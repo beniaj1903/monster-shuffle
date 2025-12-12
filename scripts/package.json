@@ -1,0 +1,19 @@
+{
+  "name": "pokerandomweb-scripts",
+  "version": "1.0.0",
+  "description": "ETL scripts for PokeRandomWeb",
+  "type": "module",
+  "main": "seed_pokedex.ts",
+  "scripts": {
+    "seed": "tsx seed_pokedex.ts"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}
+
