@@ -100,6 +100,14 @@ pub async fn submit_move(
         .get(enemy_move_id)
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Inicializar battle_stages si no están inicializados (al entrar en batalla)
+    if player_mon.battle_stages.is_none() {
+        player_mon.init_battle_stages();
+    }
+    if enemy_mon.battle_stages.is_none() {
+        enemy_mon.init_battle_stages();
+    }
+
     // Ejecutar el turno
     let turn_result = execute_turn(
         &mut player_mon,
@@ -521,6 +529,14 @@ pub async fn switch_pokemon(
             .moves
             .get(enemy_move_id)
             .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Inicializar battle_stages si no están inicializados
+        if new_active_pokemon.battle_stages.is_none() {
+            new_active_pokemon.init_battle_stages();
+        }
+        if enemy_mon.battle_stages.is_none() {
+            enemy_mon.init_battle_stages();
+        }
 
         // Ejecutar el ataque del enemigo
         execute_enemy_attack(

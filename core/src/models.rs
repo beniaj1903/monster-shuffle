@@ -139,6 +139,70 @@ pub struct StatModifiers {
     pub multipliers: StatMultipliers,
 }
 
+/// Representa los cambios temporales de stats en batalla (stages)
+/// Los valores van de -6 a +6, donde 0 es el estado base
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct StatStages {
+    pub attack: i8,          // -6 a +6
+    pub defense: i8,
+    pub special_attack: i8,
+    pub special_defense: i8,
+    pub speed: i8,
+    pub accuracy: i8,
+    pub evasion: i8,
+}
+
+impl StatStages {
+    /// Crea un StatStages con todos los valores en 0 (estado base)
+    pub const fn new() -> Self {
+        Self {
+            attack: 0,
+            defense: 0,
+            special_attack: 0,
+            special_defense: 0,
+            speed: 0,
+            accuracy: 0,
+            evasion: 0,
+        }
+    }
+
+    /// Aplica un cambio de stat, limitando el rango a -6 a +6
+    pub fn apply_change(&mut self, stat: &str, change: i8) {
+        let clamped_change = change.clamp(-6, 6);
+        match stat {
+            "attack" => self.attack = (self.attack + clamped_change).clamp(-6, 6),
+            "defense" => self.defense = (self.defense + clamped_change).clamp(-6, 6),
+            "special_attack" => self.special_attack = (self.special_attack + clamped_change).clamp(-6, 6),
+            "special_defense" => self.special_defense = (self.special_defense + clamped_change).clamp(-6, 6),
+            "speed" => self.speed = (self.speed + clamped_change).clamp(-6, 6),
+            "accuracy" => self.accuracy = (self.accuracy + clamped_change).clamp(-6, 6),
+            "evasion" => self.evasion = (self.evasion + clamped_change).clamp(-6, 6),
+            _ => {} // Ignorar stats desconocidos
+        }
+    }
+
+    /// Calcula el multiplicador de stat basado en el stage
+    /// Fórmula de Pokémon: (2 + stage) / 2 si stage >= 0, o 2 / (2 - stage) si stage < 0
+    pub fn get_stat_multiplier(&self, stat: &str) -> f32 {
+        let stage = match stat {
+            "attack" => self.attack,
+            "defense" => self.defense,
+            "special_attack" => self.special_attack,
+            "special_defense" => self.special_defense,
+            "speed" => self.speed,
+            "accuracy" => self.accuracy,
+            "evasion" => self.evasion,
+            _ => return 1.0,
+        };
+
+        if stage >= 0 {
+            (2.0 + stage as f32) / 2.0
+        } else {
+            2.0 / (2.0 - stage as f32)
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MoveTemplate {
     pub id: String,
@@ -150,8 +214,34 @@ pub struct MoveTemplate {
     pub max_pp: u8,
 }
 
+/// Metadatos de efectos secundarios de un movimiento
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct MoveMeta {
+    /// Estado alterado que puede aplicar: "burn", "paralysis", "none", etc.
+    pub ailment: String,
+    /// Probabilidad de aplicar el estado alterado (0-100)
+    pub ailment_chance: u8,
+    /// Tasa de crítico (0-4)
+    pub crit_rate: u8,
+    /// Porcentaje de daño que cura al usuario (drenaje)
+    pub drain: i8,
+    /// Probabilidad de causar retroceso (0-100)
+    pub flinch_chance: u8,
+    /// Probabilidad de que ocurran los cambios de stats (0-100)
+    pub stat_chance: u8,
+}
+
+/// Cambio de stat que aplica un movimiento
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MoveStatChange {
+    /// Nombre del stat afectado: "attack", "special_attack", "speed", etc.
+    pub stat: String,
+    /// Cambio en el stage (-6 a +6)
+    pub change: i8,
+}
+
 /// Datos de un movimiento cargado desde moves.json
-/// Estructura simplificada para el sistema de batalla
+/// Estructura completa para el sistema de batalla avanzado (VGC)
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MoveData {
     /// ID del movimiento (ej: "scratch", "tackle")
@@ -164,10 +254,22 @@ pub struct MoveData {
     pub power: Option<u16>,
     /// Precisión del movimiento (null para movimientos que siempre aciertan)
     pub accuracy: Option<u8>,
+    /// Prioridad del movimiento (puede ser negativo para movimientos lentos)
+    #[serde(default)]
+    pub priority: i8,
     /// Puntos de poder (PP) del movimiento
     pub pp: u8,
     /// Categoría de daño: "physical", "special", "status"
     pub damage_class: String,
+    /// Metadatos de efectos secundarios
+    #[serde(default)]
+    pub meta: MoveMeta,
+    /// Cambios de stats que aplica el movimiento
+    #[serde(default)]
+    pub stat_changes: Vec<MoveStatChange>,
+    /// Objetivo del movimiento: "selected-pokemon", "users-field", "user", etc.
+    #[serde(default)]
+    pub target: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -256,9 +358,14 @@ pub struct PokemonInstance {
     pub species: PokemonSpecies,
     pub level: u8,
     
-    // --- NUEVO: Estado actual ---
+    // --- Estado actual ---
     pub current_hp: u16,
     pub status_condition: Option<StatusCondition>,
+    
+    /// Stages de stats en batalla (None fuera de batalla, Some con valores base al entrar)
+    /// Representa cambios temporales de stats durante la batalla (-6 a +6)
+    #[serde(default)]
+    pub battle_stages: Option<StatStages>,
     
     pub individual_values: Stats,
     pub effort_values: Stats,
@@ -272,9 +379,25 @@ pub struct PokemonInstance {
 impl PokemonInstance {
     /// Restaura completamente el Pokémon a su estado óptimo
     /// Restaura toda la vida y elimina cualquier condición de estado
+    /// También resetea los battle_stages si están presentes
     pub fn full_restore(&mut self) {
         self.current_hp = self.base_computed_stats.hp;
         self.status_condition = None;
+        if let Some(ref mut stages) = self.battle_stages {
+            *stages = StatStages::new();
+        }
+    }
+
+    /// Inicializa los battle_stages al entrar en batalla
+    /// Debe llamarse cuando el Pokémon entra en combate
+    pub fn init_battle_stages(&mut self) {
+        self.battle_stages = Some(StatStages::new());
+    }
+
+    /// Resetea los battle_stages al salir de batalla
+    /// Debe llamarse cuando el Pokémon sale de combate
+    pub fn reset_battle_stages(&mut self) {
+        self.battle_stages = None;
     }
 
     /// Ajusta el nivel del Pokémon y recalcula sus stats

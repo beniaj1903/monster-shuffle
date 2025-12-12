@@ -3,6 +3,8 @@ import { GameSession } from '../types';
 import { HealthBar } from './HealthBar';
 import { PokemonSprite } from './PokemonSprite';
 import { PokemonSwitchModal } from './PokemonSwitchModal';
+import { StatusBadge } from './StatusBadge';
+import { StatModifiers } from './StatModifiers';
 
 interface BattleScreenProps {
   session: GameSession;
@@ -73,40 +75,28 @@ export function BattleScreen({ session, onMoveSelect, onSwitchPokemon, isBoss = 
         >
           {/* Caja de Info del Oponente */}
           <div
-            style={{
-              backgroundColor: '#ffffff',
-              border: isBoss ? '4px solid #FFD700' : '3px solid #000000',
-              borderRadius: '8px',
-              padding: '12px',
-              minWidth: '200px',
-              boxShadow: isBoss 
-                ? '0 4px 12px rgba(255, 215, 0, 0.5)' 
-                : '0 4px 8px rgba(0,0,0,0.2)',
-            }}
+            className={`bg-white rounded-lg p-3 min-w-[200px] shadow-lg ${
+              isBoss ? 'border-4 border-yellow-500 shadow-yellow-500/50' : 'border-2 border-black'
+            }`}
           >
             {isBoss && (
-              <div style={{ 
-                fontSize: '12px', 
-                fontWeight: 'bold', 
-                color: '#FFD700',
-                textShadow: '1px 1px 2px rgba(0,0,0,0.5)',
-                marginBottom: '4px',
-              }}>
+              <div className="text-xs font-bold text-yellow-500 mb-1 drop-shadow-md">
                 ⭐ LÍDER DE GIMNASIO ⭐
               </div>
             )}
-            <div style={{ 
-              fontWeight: 'bold', 
-              fontSize: '16px', 
-              marginBottom: '8px',
-              color: isBoss ? '#8B0000' : '#000000',
-            }}>
-              {session.battle?.opponent_name || opponent.species.display_name}
+            <div className="flex justify-between items-center mb-2">
+              <span className={`font-bold text-base ${isBoss ? 'text-red-900' : 'text-black'}`}>
+                {session.battle?.opponent_name || opponent.species.display_name}
+              </span>
+              <span className="text-sm text-black">Lv. {opponent.level}</span>
             </div>
-            <div style={{ fontSize: '14px', marginBottom: '8px', color: '#000000' }}>
-              Nv.{opponent.level}
+            
+            <div className="flex items-center gap-2 mb-1">
+              <HealthBar current={opponent.current_hp} max={opponent.base_computed_stats.hp} />
+              <StatusBadge status={opponent.status_condition} />
             </div>
-            <HealthBar current={opponent.current_hp} max={opponent.base_computed_stats.hp} />
+
+            <StatModifiers stages={opponent.battle_stages} />
           </div>
 
           {/* Sprite del Oponente */}
@@ -160,27 +150,24 @@ export function BattleScreen({ session, onMoveSelect, onSwitchPokemon, isBoss = 
           </div>
 
           {/* Caja de Info del Jugador */}
-          <div
-            style={{
-              backgroundColor: '#ffffff',
-              border: '3px solid #000000',
-              borderRadius: '8px',
-              padding: '12px',
-              minWidth: '200px',
-              boxShadow: '0 4px 8px rgba(0,0,0,0.2)',
-            }}
-          >
-            <div style={{ fontWeight: 'bold', fontSize: '16px', marginBottom: '8px', color: '#000000' }}>
-              {activePokemon.species.display_name}
+          <div className="bg-white border-2 border-black rounded-lg p-3 min-w-[200px] shadow-lg">
+            <div className="flex justify-between items-center mb-2">
+              <span className="font-bold text-base text-black">
+                {activePokemon.species.display_name}
+              </span>
+              <span className="text-sm text-black">Lv. {activePokemon.level}</span>
             </div>
-            <div style={{ fontSize: '14px', marginBottom: '8px', color: '#000000' }}>
-              Nv.{activePokemon.level}
+            
+            <div className="flex items-center gap-2 mb-1">
+              <HealthBar
+                current={activePokemon.current_hp}
+                max={activePokemon.base_computed_stats.hp}
+                showText={true}
+              />
+              <StatusBadge status={activePokemon.status_condition} />
             </div>
-            <HealthBar
-              current={activePokemon.current_hp}
-              max={activePokemon.base_computed_stats.hp}
-              showText={true}
-            />
+
+            <StatModifiers stages={activePokemon.battle_stages} />
           </div>
         </div>
       </div>

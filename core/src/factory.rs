@@ -158,6 +158,7 @@ pub fn create_pokemon_instance(
         level,
         current_hp: base_computed_stats.hp,
         status_condition: None,
+        battle_stages: None, // Se inicializa cuando entra en batalla
         individual_values: ivs,
         effort_values: evs,
         base_computed_stats,

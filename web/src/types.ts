@@ -33,13 +33,25 @@ export interface PokemonSpecies {
   }>;
 }
 
+// Stages de stats en batalla (cambios temporales de -6 a +6)
+export interface StatStages {
+  attack: number;
+  defense: number;
+  special_attack: number;
+  special_defense: number;
+  speed: number;
+  accuracy: number;
+  evasion: number;
+}
+
 // Instancia de Pokémon
 export interface PokemonInstance {
   id: string;
   species: PokemonSpecies;
   level: number;
   current_hp: number;
-  status_condition: string | null;
+  status_condition: 'Burn' | 'Freeze' | 'Paralysis' | 'Poison' | 'BadPoison' | 'Sleep' | null;
+  battle_stages: StatStages | null; // Puede ser null si el pokemon no ha entrado en combate
   individual_values: {
     hp: number;
     attack: number;

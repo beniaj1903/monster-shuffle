@@ -1,5 +1,5 @@
 import axios from 'axios';
-import fs from 'fs/promises';
+import { promises as fs } from 'fs';
 import * as path from 'path';
 
 // Tipo para la respuesta de la PokéAPI
@@ -12,8 +12,28 @@ interface PokeApiMove {
   power: number | null;
   accuracy: number | null;
   pp: number;
+  priority: number;
   damage_class: {
     name: string; // "physical", "special", "status"
+  };
+  meta: {
+    ailment: {
+      name: string; // "burn", "paralysis", "none", etc.
+    };
+    ailment_chance: number; // 0-100
+    crit_rate: number; // 0-4
+    drain: number; // % de daño que cura al usuario
+    flinch_chance: number; // % de retroceso
+    stat_chance: number; // % de que ocurran los cambios de stats
+  };
+  stat_changes: Array<{
+    stat: {
+      name: string; // "attack", "special-attack", etc.
+    };
+    change: number; // -6 a +6
+  }>;
+  target: {
+    name: string; // "selected-pokemon", "users-field", "user", etc.
   };
 }
 
@@ -24,8 +44,22 @@ interface MoveDataOutput {
   type: string;
   power: number | null;
   accuracy: number | null;
+  priority: number;
   pp: number;
   damage_class: string;
+  meta: {
+    ailment: string;
+    ailment_chance: number;
+    crit_rate: number;
+    drain: number;
+    flinch_chance: number;
+    stat_chance: number;
+  };
+  stat_changes: Array<{
+    stat: string;
+    change: number;
+  }>;
+  target: string;
 }
 
 // Función para capitalizar la primera letra (para tipos)
@@ -43,6 +77,18 @@ function mapDamageClass(apiClass: string): string {
   return apiClass; // Ya viene en el formato correcto: "physical", "special", "status"
 }
 
+// Función para mapear nombres de stats de la API a nuestro formato
+// "special-attack" -> "special_attack", "attack" -> "attack", etc.
+function mapStatName(apiStatName: string): string {
+  return apiStatName.replace(/-/g, '_');
+}
+
+// Función para mapear el nombre del ailment
+function mapAilment(apiAilment: string): string {
+  // La API usa "none" para movimientos sin efecto de estado
+  return apiAilment === 'none' ? 'none' : apiAilment;
+}
+
 // Función para obtener datos de un movimiento por ID
 async function fetchMoveData(id: number): Promise<MoveDataOutput | null> {
   try {
@@ -55,14 +101,31 @@ async function fetchMoveData(id: number): Promise<MoveDataOutput | null> {
 
     const move = response.data;
 
+    // Mapear stat_changes
+    const stat_changes = move.stat_changes.map((statChange) => ({
+      stat: mapStatName(statChange.stat.name),
+      change: statChange.change,
+    }));
+
     return {
       id: move.name, // Usamos el nombre como ID (ej: "scratch")
       name: capitalizeFirst(move.name.replace(/-/g, ' ')), // "scratch" -> "Scratch"
       type: mapType(move.type.name),
       power: move.power,
       accuracy: move.accuracy,
+      priority: move.priority,
       pp: move.pp,
       damage_class: mapDamageClass(move.damage_class.name),
+      meta: {
+        ailment: mapAilment(move.meta.ailment.name),
+        ailment_chance: move.meta.ailment_chance,
+        crit_rate: move.meta.crit_rate,
+        drain: move.meta.drain,
+        flinch_chance: move.meta.flinch_chance,
+        stat_chance: move.meta.stat_chance,
+      },
+      stat_changes: stat_changes,
+      target: move.target.name,
     };
   } catch (error) {
     if (axios.isAxiosError(error)) {

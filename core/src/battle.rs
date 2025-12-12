@@ -235,6 +235,39 @@ fn has_stab(attacker: &PokemonInstance, move_type: &PokemonType) -> bool {
             .unwrap_or(false)
 }
 
+/// Calcula el multiplicador de stat basado en el stage
+/// Fórmula estándar de Pokémon:
+/// - Si stage >= 0: (2.0 + stage) / 2.0
+/// - Si stage < 0: 2.0 / (2.0 + abs(stage))
+fn get_stat_multiplier(stage: i8) -> f32 {
+    if stage >= 0 {
+        (2.0 + stage as f32) / 2.0
+    } else {
+        2.0 / (2.0 - stage as f32)
+    }
+}
+
+/// Calcula la velocidad efectiva considerando stages y condiciones de estado
+fn get_effective_speed(pokemon: &PokemonInstance) -> f32 {
+    let base_speed = pokemon.base_computed_stats.speed as f32;
+    
+    // Aplicar multiplicador de stage de velocidad
+    let speed_multiplier = if let Some(ref stages) = pokemon.battle_stages {
+        get_stat_multiplier(stages.speed)
+    } else {
+        1.0
+    };
+    
+    let speed_with_stages = base_speed * speed_multiplier;
+    
+    // Aplicar efecto de parálisis (reduce velocidad a la mitad)
+    if pokemon.status_condition == Some(StatusCondition::Paralysis) {
+        speed_with_stages * 0.5
+    } else {
+        speed_with_stages
+    }
+}
+
 /// Calcula el daño de un movimiento
 /// Retorna (daño, mensaje de efectividad)
 fn calculate_damage(
@@ -267,32 +300,64 @@ fn calculate_damage(
     };
 
     // Determinar el stat de ataque y defensa según la clase de daño
-    let (attack_stat, defense_stat) = if move_data.damage_class == "physical" {
+    let (base_attack_stat, base_defense_stat, attack_stat_name, defense_stat_name) = if move_data.damage_class == "physical" {
         (
             attacker.base_computed_stats.attack,
             defender.base_computed_stats.defense,
+            "attack",
+            "defense",
         )
     } else if move_data.damage_class == "special" {
         (
             attacker.base_computed_stats.special_attack,
             defender.base_computed_stats.special_defense,
+            "special_attack",
+            "special_defense",
         )
     } else {
         // "status" - no hace daño
         return (0, String::new());
     };
 
+    // Aplicar multiplicadores de stats stages
+    let attack_multiplier = if let Some(ref stages) = attacker.battle_stages {
+        get_stat_multiplier(match attack_stat_name {
+            "attack" => stages.attack,
+            "special_attack" => stages.special_attack,
+            _ => 0,
+        })
+    } else {
+        1.0
+    };
+
+    let defense_multiplier = if let Some(ref stages) = defender.battle_stages {
+        get_stat_multiplier(match defense_stat_name {
+            "defense" => stages.defense,
+            "special_defense" => stages.special_defense,
+            _ => 0,
+        })
+    } else {
+        1.0
+    };
+
+    // Calcular stats efectivos
+    let attack = (base_attack_stat as f32) * attack_multiplier;
+    let defense = (base_defense_stat as f32) * defense_multiplier;
+
     // Fórmula de daño Gen 3+
     // Damage = ((((2 * Level / 5 + 2) * Power * A / D) / 50) + 2) * Modifiers
     let level = attacker.level as f32;
     let power = power as f32;
-    let attack = attack_stat as f32;
-    let defense = defense_stat as f32;
 
     let base_damage = ((2.0 * level / 5.0 + 2.0) * power * attack / defense) / 50.0 + 2.0;
 
     // Modificadores: STAB y efectividad de tipo
-    let modifiers = stab_multiplier * type_effectiveness;
+    let mut modifiers = stab_multiplier * type_effectiveness;
+
+    // Efecto de Quemadura (Burn): reduce el daño físico a la mitad
+    if move_data.damage_class == "physical" && attacker.status_condition == Some(StatusCondition::Burn) {
+        modifiers *= 0.5;
+    }
 
     // Factor aleatorio (0.85 - 1.0)
     let random_factor = rng.gen_range(0.85..=1.0);
@@ -318,72 +383,327 @@ fn calculate_damage(
     (damage, effectiveness_msg)
 }
 
-/// Aplica daño de condiciones de estado (quemadura, veneno, etc.)
-fn apply_status_damage(pokemon: &mut PokemonInstance, logs: &mut Vec<String>) {
-    if let Some(status) = &pokemon.status_condition {
-        match status {
-            StatusCondition::Burn => {
-                let damage = pokemon.base_computed_stats.hp / 16;
-                if damage >= pokemon.current_hp {
-                    pokemon.current_hp = 0;
-                    logs.push(format!("{} se quemó y perdió {} HP!", pokemon.species.display_name, damage));
+/// Aplica los efectos secundarios de un movimiento (cambios de stats y estados alterados)
+fn apply_move_secondary_effects(
+    move_data: &MoveData,
+    attacker: &mut PokemonInstance,
+    defender: &mut PokemonInstance,
+    logs: &mut Vec<String>,
+    rng: &mut StdRng,
+) {
+    // Aplicar cambios de stats
+    if !move_data.stat_changes.is_empty() {
+        // Verificar probabilidad de stat_chance (si es 0, asumimos 100%)
+        let stat_chance = if move_data.meta.stat_chance == 0 {
+            100
+        } else {
+            move_data.meta.stat_chance
+        };
+
+        let roll = rng.gen_range(0..=100);
+        if roll <= stat_chance as u32 {
+            // Guardar los nombres antes del loop para evitar problemas de borrow
+            let attacker_name = attacker.species.display_name.clone();
+            let defender_name = defender.species.display_name.clone();
+            
+            for stat_change in &move_data.stat_changes {
+                // Determinar el objetivo del cambio basándose en el campo 'target' del movimiento
+                // Si target es "user", aplicar al atacante (quien usó el movimiento)
+                // Si target es "selected-pokemon", "all-opponents", o cualquier otro, aplicar al defensor
+                let apply_to_user = move_data.target == "user";
+                
+                // Aplicar el cambio según el objetivo
+                if apply_to_user {
+                    // Inicializar battle_stages si no existen
+                    if attacker.battle_stages.is_none() {
+                        attacker.init_battle_stages();
+                    }
+
+                    if let Some(ref mut stages) = attacker.battle_stages {
+                        let old_stage = match stat_change.stat.as_str() {
+                            "attack" => stages.attack,
+                            "defense" => stages.defense,
+                            "special_attack" => stages.special_attack,
+                            "special_defense" => stages.special_defense,
+                            "speed" => stages.speed,
+                            "accuracy" => stages.accuracy,
+                            "evasion" => stages.evasion,
+                            _ => continue, // Ignorar stats desconocidos
+                        };
+
+                        stages.apply_change(&stat_change.stat, stat_change.change);
+                        let new_stage = match stat_change.stat.as_str() {
+                            "attack" => stages.attack,
+                            "defense" => stages.defense,
+                            "special_attack" => stages.special_attack,
+                            "special_defense" => stages.special_defense,
+                            "speed" => stages.speed,
+                            "accuracy" => stages.accuracy,
+                            "evasion" => stages.evasion,
+                            _ => continue,
+                        };
+
+                        // Generar mensaje de log
+                        let stat_name = match stat_change.stat.as_str() {
+                            "attack" => "ataque",
+                            "defense" => "defensa",
+                            "special_attack" => "ataque especial",
+                            "special_defense" => "defensa especial",
+                            "speed" => "velocidad",
+                            "accuracy" => "precisión",
+                            "evasion" => "evasión",
+                            _ => continue,
+                        };
+
+                        if new_stage > old_stage {
+                            logs.push(format!(
+                                "¡El {} de {} subió!",
+                                stat_name,
+                                attacker_name
+                            ));
+                        } else if new_stage < old_stage {
+                            logs.push(format!(
+                                "¡El {} de {} bajó!",
+                                stat_name,
+                                attacker_name
+                            ));
+                        }
+                    }
                 } else {
-                    pokemon.current_hp -= damage;
-                    logs.push(format!("{} se quemó y perdió {} HP!", pokemon.species.display_name, damage));
+                    // Afecta al defensor
+                    // Inicializar battle_stages si no existen
+                    if defender.battle_stages.is_none() {
+                        defender.init_battle_stages();
+                    }
+
+                    if let Some(ref mut stages) = defender.battle_stages {
+                        let old_stage = match stat_change.stat.as_str() {
+                            "attack" => stages.attack,
+                            "defense" => stages.defense,
+                            "special_attack" => stages.special_attack,
+                            "special_defense" => stages.special_defense,
+                            "speed" => stages.speed,
+                            "accuracy" => stages.accuracy,
+                            "evasion" => stages.evasion,
+                            _ => continue, // Ignorar stats desconocidos
+                        };
+
+                        stages.apply_change(&stat_change.stat, stat_change.change);
+                        let new_stage = match stat_change.stat.as_str() {
+                            "attack" => stages.attack,
+                            "defense" => stages.defense,
+                            "special_attack" => stages.special_attack,
+                            "special_defense" => stages.special_defense,
+                            "speed" => stages.speed,
+                            "accuracy" => stages.accuracy,
+                            "evasion" => stages.evasion,
+                            _ => continue,
+                        };
+
+                        // Generar mensaje de log
+                        let stat_name = match stat_change.stat.as_str() {
+                            "attack" => "ataque",
+                            "defense" => "defensa",
+                            "special_attack" => "ataque especial",
+                            "special_defense" => "defensa especial",
+                            "speed" => "velocidad",
+                            "accuracy" => "precisión",
+                            "evasion" => "evasión",
+                            _ => continue,
+                        };
+
+                        if new_stage > old_stage {
+                            logs.push(format!(
+                                "¡El {} de {} subió!",
+                                stat_name,
+                                defender_name
+                            ));
+                        } else if new_stage < old_stage {
+                            logs.push(format!(
+                                "¡El {} de {} bajó!",
+                                stat_name,
+                                defender_name
+                            ));
+                        }
+                    }
                 }
             }
-            StatusCondition::Poison => {
-                let damage = pokemon.base_computed_stats.hp / 8;
-                if damage >= pokemon.current_hp {
-                    pokemon.current_hp = 0;
-                    logs.push(format!("{} se envenenó y perdió {} HP!", pokemon.species.display_name, damage));
-                } else {
-                    pokemon.current_hp -= damage;
-                    logs.push(format!("{} se envenenó y perdió {} HP!", pokemon.species.display_name, damage));
+        }
+    }
+
+    // Aplicar estados alterados
+    if move_data.meta.ailment != "none" && move_data.meta.ailment_chance > 0 {
+        let roll = rng.gen_range(0..=100);
+        if roll <= move_data.meta.ailment_chance as u32 {
+            // Verificar si el defensor ya tiene un estado
+            if defender.status_condition.is_none() {
+                // Verificar inmunidades por tipo
+                let is_immune = match move_data.meta.ailment.as_str() {
+                    "burn" => {
+                        // Fuego no se quema
+                        defender.randomized_profile.rolled_primary_type == PokemonType::Fire
+                            || defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Fire)
+                    }
+                    "paralysis" => {
+                        // Eléctrico no se paraliza
+                        defender.randomized_profile.rolled_primary_type == PokemonType::Electric
+                            || defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Electric)
+                    }
+                    "poison" => {
+                        // Veneno y Acero no se envenenan
+                        defender.randomized_profile.rolled_primary_type == PokemonType::Poison
+                            || defender.randomized_profile.rolled_primary_type == PokemonType::Steel
+                            || defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Poison)
+                            || defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Steel)
+                    }
+                    _ => false,
+                };
+
+                if !is_immune {
+                    // Aplicar el estado alterado
+                    let status = match move_data.meta.ailment.as_str() {
+                        "burn" => Some(StatusCondition::Burn),
+                        "paralysis" => Some(StatusCondition::Paralysis),
+                        "poison" => Some(StatusCondition::Poison),
+                        "bad-poison" | "tox" => Some(StatusCondition::BadPoison),
+                        "sleep" => Some(StatusCondition::Sleep),
+                        "freeze" => Some(StatusCondition::Freeze),
+                        _ => None,
+                    };
+
+                    if let Some(status_condition) = status {
+                        defender.status_condition = Some(status_condition);
+                        let status_msg = match status_condition {
+                            StatusCondition::Burn => "quemó",
+                            StatusCondition::Paralysis => "paralizó",
+                            StatusCondition::Poison => "envenenó",
+                            StatusCondition::BadPoison => "envenenó gravemente",
+                            StatusCondition::Sleep => "durmió",
+                            StatusCondition::Freeze => "congeló",
+                        };
+                        logs.push(format!(
+                            "¡{} se ha {}!",
+                            defender.species.display_name,
+                            status_msg
+                        ));
+                    }
                 }
             }
-            StatusCondition::BadPoison => {
-                // Toxic: aumenta el daño cada turno (simplificado: daño fijo alto)
-                let damage = pokemon.base_computed_stats.hp / 4;
-                if damage >= pokemon.current_hp {
-                    pokemon.current_hp = 0;
-                    logs.push(format!("{} recibió {} HP de daño por Toxic!", pokemon.species.display_name, damage));
-                } else {
-                    pokemon.current_hp -= damage;
-                    logs.push(format!("{} recibió {} HP de daño por Toxic!", pokemon.species.display_name, damage));
-                }
-            }
-            _ => {}
         }
     }
 }
 
-/// Verifica si un Pokémon puede moverse basándose en su condición de estado
-fn can_move(pokemon: &PokemonInstance, rng: &mut StdRng) -> bool {
+/// Aplica efectos residuales de condiciones de estado (quemadura, veneno, etc.)
+/// Retorna (daño_recibido, logs)
+pub fn apply_residual_effects(pokemon: &mut PokemonInstance) -> (u16, Vec<String>) {
+    let mut logs = Vec::new();
+    let mut total_damage = 0u16;
+    
     if let Some(status) = &pokemon.status_condition {
         match status {
+            StatusCondition::Burn => {
+                let max_hp = pokemon.base_computed_stats.hp;
+                let damage = max_hp / 16;
+                let actual_damage = damage.min(pokemon.current_hp);
+                pokemon.current_hp = pokemon.current_hp.saturating_sub(damage);
+                total_damage = actual_damage;
+                logs.push(format!(
+                    "¡{} se lastima por la quemadura!",
+                    pokemon.species.display_name
+                ));
+            }
+            StatusCondition::Poison => {
+                let max_hp = pokemon.base_computed_stats.hp;
+                let damage = max_hp / 8;
+                let actual_damage = damage.min(pokemon.current_hp);
+                pokemon.current_hp = pokemon.current_hp.saturating_sub(damage);
+                total_damage = actual_damage;
+                logs.push(format!(
+                    "¡{} sufre por el veneno!",
+                    pokemon.species.display_name
+                ));
+            }
+            StatusCondition::BadPoison => {
+                // Toxic: aumenta el daño cada turno (simplificado: daño fijo alto)
+                let max_hp = pokemon.base_computed_stats.hp;
+                let damage = max_hp / 4;
+                let actual_damage = damage.min(pokemon.current_hp);
+                pokemon.current_hp = pokemon.current_hp.saturating_sub(damage);
+                total_damage = actual_damage;
+                logs.push(format!(
+                    "¡{} sufre gravemente por el veneno!",
+                    pokemon.species.display_name
+                ));
+            }
+            _ => {
+                // Freeze, Sleep, Paralysis no causan daño residual
+            }
+        }
+    }
+    
+    (total_damage, logs)
+}
+
+/// Verifica si un Pokémon puede moverse basándose en su condición de estado
+/// Retorna (puede_moverse, logs)
+fn can_pokemon_move(pokemon: &mut PokemonInstance, rng: &mut StdRng) -> (bool, Vec<String>) {
+    let mut logs = Vec::new();
+    
+    if let Some(status) = &pokemon.status_condition {
+        match status {
+            StatusCondition::Sleep => {
+                // 33% de probabilidad de despertar
+                if rng.gen_bool(0.33) {
+                    pokemon.status_condition = None;
+                    logs.push(format!(
+                        "¡{} se despertó!",
+                        pokemon.species.display_name
+                    ));
+                    return (true, logs);
+                } else {
+                    logs.push(format!(
+                        "¡{} está dormido!",
+                        pokemon.species.display_name
+                    ));
+                    return (false, logs);
+                }
+            }
             StatusCondition::Freeze => {
                 // 20% de probabilidad de descongelarse
                 if rng.gen_bool(0.2) {
-                    return true;
+                    pokemon.status_condition = None;
+                    logs.push(format!(
+                        "¡{} se descongeló!",
+                        pokemon.species.display_name
+                    ));
+                    return (true, logs);
+                } else {
+                    logs.push(format!(
+                        "¡{} está congelado!",
+                        pokemon.species.display_name
+                    ));
+                    return (false, logs);
                 }
-                return false;
-            }
-            StatusCondition::Sleep => {
-                // Simplificado: duerme por un número aleatorio de turnos
-                // Por ahora, siempre duerme (se puede mejorar)
-                return false;
             }
             StatusCondition::Paralysis => {
-                // 25% de probabilidad de no poder moverse
+                // 25% de probabilidad de NO moverse
                 if rng.gen_bool(0.25) {
-                    return false;
+                    logs.push(format!(
+                        "¡{} está paralizado y no se puede mover!",
+                        pokemon.species.display_name
+                    ));
+                    return (false, logs);
                 }
+                // Si pasa el 75%, puede moverse (no se añade log)
             }
-            _ => {}
+            _ => {
+                // Burn, Poison, BadPoison no impiden el movimiento
+                // Retornar true sin logs adicionales
+            }
         }
     }
-    true
+    
+    (true, logs)
 }
 
 /// Determina el resultado cuando el enemigo se debilita
@@ -446,263 +766,205 @@ pub fn execute_turn(
 ) -> TurnResult {
     let mut result = TurnResult::new();
 
-    // PASO 1: Determinar quién ataca primero basándose en la velocidad
-    let player_speed = player_mon.base_computed_stats.speed;
-    let enemy_speed = enemy_mon.base_computed_stats.speed;
-
-    let player_goes_first = if player_speed > enemy_speed {
-        true
-    } else if enemy_speed > player_speed {
-        false
-    } else {
-        // Empate: decidir al azar
-        rng.gen_bool(0.5)
-    };
-
-    // Verificar condiciones de estado y precisión ANTES de determinar quién es first/second
-    let player_can_move = can_move(player_mon, rng);
-    let enemy_can_move = can_move(enemy_mon, rng);
+    // PASO 1: Determinar quién ataca primero basándose en la velocidad efectiva
+    // Considera stages de velocidad y condiciones de estado (parálisis)
+    // También considera la prioridad del movimiento
+    let player_effective_speed = get_effective_speed(player_mon);
+    let enemy_effective_speed = get_effective_speed(enemy_mon);
     
-    let player_move_hits = if !player_can_move {
-        false
-    } else if let Some(accuracy) = player_move.accuracy {
-        let roll = rng.gen_range(0..=100);
-        roll <= accuracy as u32
-    } else {
+    // Comparar prioridad primero (mayor prioridad ataca primero)
+    let player_goes_first = if player_move.priority > enemy_move.priority {
         true
-    };
-
-    let enemy_move_hits = if !enemy_can_move {
+    } else if enemy_move.priority > player_move.priority {
         false
-    } else if let Some(accuracy) = enemy_move.accuracy {
-        let roll = rng.gen_range(0..=100);
-        roll <= accuracy as u32
     } else {
-        true
-    };
-
-    // PASO 2: Primer ataque
-    if player_goes_first {
-        // Jugador ataca primero
-        result.logs.push(format!(
-            "{} usó {}",
-            player_mon.species.display_name, player_move.name
-        ));
-
-        if player_move_hits {
-            let (damage, effectiveness_msg) = calculate_damage(player_mon, enemy_mon, player_move, rng);
-            result.player_damage_dealt = damage;
-
-            if !effectiveness_msg.is_empty() {
-                result.logs.push(effectiveness_msg);
-            }
-
-            // Aplicar daño
-            if damage >= enemy_mon.current_hp {
-                enemy_mon.current_hp = 0;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    enemy_mon.species.display_name, damage
-                ));
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    enemy_mon.species.display_name
-                ));
-                // IMPORTANTE: Actualizar el HP del oponente en el battle_state ANTES de verificar reservas
-                // Esto asegura que cuando switch_to_next_opponent busque otros Pokémon, tenga el estado correcto
-                *battle_state.get_opponent_active_mut() = enemy_mon.clone();
-                // CHECK CRÍTICO: Si el enemigo se debilitó, verificar reservas y retornar
-                result.outcome = determine_enemy_outcome(battle_state);
-                return result;
-            } else {
-                enemy_mon.current_hp -= damage;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    enemy_mon.species.display_name, damage
-                ));
-            }
-
-            // Aplicar daño de condiciones de estado
-            apply_status_damage(enemy_mon, &mut result.logs);
-            
-            // Verificar si se debilitó por condición de estado
-            if enemy_mon.current_hp == 0 {
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    enemy_mon.species.display_name
-                ));
-                // IMPORTANTE: Actualizar el HP del oponente en el battle_state ANTES de verificar reservas
-                *battle_state.get_opponent_active_mut() = enemy_mon.clone();
-                result.outcome = determine_enemy_outcome(battle_state);
-                return result;
-            }
+        // Misma prioridad: comparar velocidad efectiva
+        if player_effective_speed > enemy_effective_speed {
+            true
+        } else if enemy_effective_speed > player_effective_speed {
+            false
         } else {
-            result.logs.push("¡Pero falló!".to_string());
+            // Empate: decidir al azar
+            rng.gen_bool(0.5)
+        }
+    };
+
+    // PASO 2: Ejecutar ataques en orden
+    // Helper interno para ejecutar el ataque de un Pokémon
+    // Retorna true si el objetivo se debilitó
+    let execute_attack = |attacker: &mut PokemonInstance,
+                          defender: &mut PokemonInstance,
+                          move_data: &MoveData,
+                          attacker_name: &str,
+                          defender_name: &str,
+                          logs: &mut Vec<String>,
+                          rng: &mut StdRng| -> bool {
+        // Check previo: ¿Puede moverse?
+        let (can_move, status_logs) = can_pokemon_move(attacker, rng);
+        logs.extend(status_logs);
+
+        if !can_move {
+            // No puede moverse, solo añadir logs y continuar
+            return false;
         }
 
-        // PASO 3: Segundo ataque - Solo si el enemigo sigue vivo
-        result.logs.push(format!(
-            "El enemigo {} usó {}",
-            enemy_mon.species.display_name, enemy_move.name
-        ));
+        // Puede moverse: ejecutar el ataque
+        logs.push(format!("{} usó {}", attacker_name, move_data.name));
 
-        if enemy_move_hits {
-            let (damage, effectiveness_msg) = calculate_damage(enemy_mon, player_mon, enemy_move, rng);
-            result.enemy_damage_dealt = damage;
-
-            if !effectiveness_msg.is_empty() {
-                result.logs.push(effectiveness_msg);
-            }
-
-            // Aplicar daño
-            if damage >= player_mon.current_hp {
-                player_mon.current_hp = 0;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    player_mon.species.display_name, damage
-                ));
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    player_mon.species.display_name
-                ));
-                // CHECK CRÍTICO: Si el jugador se debilitó, verificar reservas y retornar
-                result.outcome = determine_player_outcome(player_team, player_active_index);
-                return result;
-            } else {
-                player_mon.current_hp -= damage;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    player_mon.species.display_name, damage
-                ));
-            }
-
-            // Aplicar daño de condiciones de estado
-            apply_status_damage(player_mon, &mut result.logs);
-            
-            // Verificar si se debilitó por condición de estado
-            if player_mon.current_hp == 0 {
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    player_mon.species.display_name
-                ));
-                result.outcome = determine_player_outcome(player_team, player_active_index);
-                return result;
-            }
+        // Verificar precisión
+        let move_hits = if let Some(accuracy) = move_data.accuracy {
+            let roll = rng.gen_range(0..=100);
+            roll <= accuracy as u32
         } else {
-            result.logs.push("¡Pero falló!".to_string());
+            true
+        };
+
+        if !move_hits {
+            logs.push("¡Pero falló!".to_string());
+            return false;
+        }
+
+        // Calcular y aplicar daño
+        let (damage, effectiveness_msg) = calculate_damage(attacker, defender, move_data, rng);
+        
+        if !effectiveness_msg.is_empty() {
+            logs.push(effectiveness_msg);
+        }
+
+        // Aplicar daño
+        if damage >= defender.current_hp {
+            defender.current_hp = 0;
+            logs.push(format!("{} recibió {} de daño", defender_name, damage));
+            logs.push(format!("{} se debilitó", defender_name));
+            return true; // Objetivo debilitado
+        } else {
+            defender.current_hp -= damage;
+            logs.push(format!("{} recibió {} de daño", defender_name, damage));
+        }
+
+        // Aplicar efectos secundarios del movimiento (stats y estados)
+        apply_move_secondary_effects(
+            move_data,
+            attacker,
+            defender,
+            logs,
+            rng,
+        );
+
+        false // Objetivo sigue vivo
+    };
+
+    // PASO 2: Ejecutar ataques en orden
+    // Guardar nombres antes de las llamadas para evitar problemas de borrow
+    let player_name = player_mon.species.display_name.clone();
+    let enemy_name = enemy_mon.species.display_name.clone();
+    
+    if player_goes_first {
+        // Jugador ataca primero
+        let enemy_dead = execute_attack(
+            player_mon,
+            enemy_mon,
+            player_move,
+            &player_name,
+            &enemy_name,
+            &mut result.logs,
+            rng,
+        );
+        
+        if enemy_dead {
+            // Actualizar el HP del oponente en el battle_state ANTES de verificar reservas
+            *battle_state.get_opponent_active_mut() = enemy_mon.clone();
+            result.outcome = determine_enemy_outcome(battle_state);
+            return result;
+        }
+
+        // Segundo ataque - Solo si el enemigo sigue vivo
+        let enemy_name_for_log = format!("El enemigo {}", enemy_name);
+        let player_dead = execute_attack(
+            enemy_mon,
+            player_mon,
+            enemy_move,
+            &enemy_name_for_log,
+            &player_name,
+            &mut result.logs,
+            rng,
+        );
+
+        if player_dead {
+            result.outcome = determine_player_outcome(player_team, player_active_index);
+            return result;
         }
     } else {
         // Enemigo ataca primero
-        result.logs.push(format!(
-            "El enemigo {} usó {}",
-            enemy_mon.species.display_name, enemy_move.name
-        ));
+        let enemy_name_for_log = format!("El enemigo {}", enemy_name);
+        let player_dead = execute_attack(
+            enemy_mon,
+            player_mon,
+            enemy_move,
+            &enemy_name_for_log,
+            &player_name,
+            &mut result.logs,
+            rng,
+        );
 
-        if enemy_move_hits {
-            let (damage, effectiveness_msg) = calculate_damage(enemy_mon, player_mon, enemy_move, rng);
-            result.enemy_damage_dealt = damage;
-
-            if !effectiveness_msg.is_empty() {
-                result.logs.push(effectiveness_msg);
-            }
-
-            // Aplicar daño
-            if damage >= player_mon.current_hp {
-                player_mon.current_hp = 0;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    player_mon.species.display_name, damage
-                ));
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    player_mon.species.display_name
-                ));
-                // CHECK CRÍTICO: Si el jugador se debilitó, verificar reservas y retornar
-                result.outcome = determine_player_outcome(player_team, player_active_index);
-                return result;
-            } else {
-                player_mon.current_hp -= damage;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    player_mon.species.display_name, damage
-                ));
-            }
-
-            // Aplicar daño de condiciones de estado
-            apply_status_damage(player_mon, &mut result.logs);
-            
-            // Verificar si se debilitó por condición de estado
-            if player_mon.current_hp == 0 {
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    player_mon.species.display_name
-                ));
-                result.outcome = determine_player_outcome(player_team, player_active_index);
-                return result;
-            }
-        } else {
-            result.logs.push("¡Pero falló!".to_string());
+        if player_dead {
+            result.outcome = determine_player_outcome(player_team, player_active_index);
+            return result;
         }
 
-        // PASO 3: Segundo ataque - Solo si el jugador sigue vivo
-        result.logs.push(format!(
-            "{} usó {}",
-            player_mon.species.display_name, player_move.name
-        ));
+        // Segundo ataque - Solo si el jugador sigue vivo
+        let enemy_dead = execute_attack(
+            player_mon,
+            enemy_mon,
+            player_move,
+            &player_name,
+            &enemy_name,
+            &mut result.logs,
+            rng,
+        );
 
-        if player_move_hits {
-            let (damage, effectiveness_msg) = calculate_damage(player_mon, enemy_mon, player_move, rng);
-            result.player_damage_dealt = damage;
-
-            if !effectiveness_msg.is_empty() {
-                result.logs.push(effectiveness_msg);
-            }
-
-            // Aplicar daño
-            if damage >= enemy_mon.current_hp {
-                enemy_mon.current_hp = 0;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    enemy_mon.species.display_name, damage
-                ));
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    enemy_mon.species.display_name
-                ));
-                // IMPORTANTE: Actualizar el HP del oponente en el battle_state ANTES de verificar reservas
-                // Esto asegura que cuando switch_to_next_opponent busque otros Pokémon, tenga el estado correcto
-                *battle_state.get_opponent_active_mut() = enemy_mon.clone();
-                // CHECK CRÍTICO: Si el enemigo se debilitó, verificar reservas y retornar
-                result.outcome = determine_enemy_outcome(battle_state);
-                return result;
-            } else {
-                enemy_mon.current_hp -= damage;
-                result.logs.push(format!(
-                    "{} recibió {} de daño",
-                    enemy_mon.species.display_name, damage
-                ));
-            }
-
-            // Aplicar daño de condiciones de estado
-            apply_status_damage(enemy_mon, &mut result.logs);
-            
-            // Verificar si se debilitó por condición de estado
-            if enemy_mon.current_hp == 0 {
-                result.logs.push(format!(
-                    "{} se debilitó",
-                    enemy_mon.species.display_name
-                ));
-                // IMPORTANTE: Actualizar el HP del oponente en el battle_state ANTES de verificar reservas
-                *battle_state.get_opponent_active_mut() = enemy_mon.clone();
-                result.outcome = determine_enemy_outcome(battle_state);
-                return result;
-            }
-        } else {
-            result.logs.push("¡Pero falló!".to_string());
+        if enemy_dead {
+            // Actualizar el HP del oponente en el battle_state ANTES de verificar reservas
+            *battle_state.get_opponent_active_mut() = enemy_mon.clone();
+            result.outcome = determine_enemy_outcome(battle_state);
+            return result;
         }
     }
 
-    // Si llegamos aquí, ambos Pokémon siguen vivos
+    // BLOQUE FINAL: Efectos residuales post-turno
+    // Solo si la batalla no ha terminado después de que ambos intentaran actuar
+    
+    // Aplicar efectos residuales al jugador
+    let (_, player_residual_logs) = apply_residual_effects(player_mon);
+    result.logs.extend(player_residual_logs);
+    
+    // Verificar si el jugador murió por daño residual
+    if player_mon.current_hp == 0 {
+        result.logs.push(format!(
+            "{} se debilitó",
+            player_mon.species.display_name
+        ));
+        result.outcome = determine_player_outcome(player_team, player_active_index);
+        return result;
+    }
+
+    // Aplicar efectos residuales al enemigo
+    let (_, enemy_residual_logs) = apply_residual_effects(enemy_mon);
+    result.logs.extend(enemy_residual_logs);
+    
+    // Verificar si el enemigo murió por daño residual
+    if enemy_mon.current_hp == 0 {
+        result.logs.push(format!(
+            "{} se debilitó",
+            enemy_mon.species.display_name
+        ));
+        // Actualizar el HP del oponente en el battle_state ANTES de verificar reservas
+        *battle_state.get_opponent_active_mut() = enemy_mon.clone();
+        result.outcome = determine_enemy_outcome(battle_state);
+        return result;
+    }
+
+    // Si llegamos aquí, ambos Pokémon siguen vivos después de todos los efectos
     result.outcome = BattleOutcome::Continue;
     result
 }
@@ -720,7 +982,8 @@ pub fn execute_enemy_attack(
     let mut result = TurnResult::new();
 
     // Verificar si el enemigo puede moverse (condiciones de estado)
-    let enemy_can_move = can_move(enemy_mon, rng);
+    let (enemy_can_move, enemy_status_logs) = can_pokemon_move(enemy_mon, rng);
+    result.logs.extend(enemy_status_logs);
 
     // Verificar precisión del movimiento del enemigo (si aplica)
     let enemy_move_hits = if !enemy_can_move {
@@ -769,11 +1032,37 @@ pub fn execute_enemy_attack(
             ));
         }
 
-        // Aplicar daño de condiciones de estado
-        apply_status_damage(player_mon, &mut result.logs);
+        // Aplicar efectos secundarios del movimiento (stats y estados)
+        apply_move_secondary_effects(
+            enemy_move,
+            enemy_mon,
+            player_mon,
+            &mut result.logs,
+            rng,
+        );
     } else {
         result.logs.push("¡Pero falló!".to_string());
     }
 
+    // BLOQUE FINAL: Efectos residuales post-turno
+    // Aplicar efectos residuales al jugador
+    let (_, player_residual_logs) = apply_residual_effects(player_mon);
+    result.logs.extend(player_residual_logs);
+    
+    // Verificar si el jugador murió por daño residual
+    if player_mon.current_hp == 0 {
+        result.logs.push(format!(
+            "{} se debilitó",
+            player_mon.species.display_name
+        ));
+        // Nota: Para execute_enemy_attack, no tenemos acceso a player_team
+        // El handler deberá verificar esto después
+        result.outcome = BattleOutcome::PlayerMustSwitch;
+        return result;
+    }
+
+    // Si llegamos aquí, el jugador sigue vivo
+    result.outcome = BattleOutcome::Continue;
     result
 }
+

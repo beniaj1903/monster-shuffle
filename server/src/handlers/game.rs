@@ -271,12 +271,26 @@ pub async fn explore(
             opponent_team.push(instance);
         }
 
+        // Inicializar battle_stages para los oponentes al entrar en batalla
+        for opponent in &mut opponent_team {
+            if opponent.battle_stages.is_none() {
+                opponent.init_battle_stages();
+            }
+        }
+
         // Crear el estado de batalla contra el líder
         let battle_state = BattleState::new_trainer_battle(
             0, // El jugador usa su primer Pokémon
             opponent_team,
             leader_name.clone(),
         );
+
+        // Inicializar battle_stages para los Pokémon del jugador al entrar en batalla
+        if let Some(player_pokemon) = session.team.active_members.get_mut(0) {
+            if player_pokemon.battle_stages.is_none() {
+                player_pokemon.init_battle_stages();
+            }
+        }
 
         // Inicializar la batalla
         session.battle = Some(battle_state);
@@ -428,13 +442,25 @@ pub async fn select_encounter(
     }
 
     // Extraer el Pokémon seleccionado
-    let selected_pokemon = encounter_choices[payload.selection_index].clone();
+    let mut selected_pokemon = encounter_choices[payload.selection_index].clone();
+
+    // Inicializar battle_stages para el oponente al entrar en batalla
+    if selected_pokemon.battle_stages.is_none() {
+        selected_pokemon.init_battle_stages();
+    }
 
     // Crear el estado de batalla contra el Pokémon salvaje
     let mut battle_state = BattleState::new(
         0, // El jugador usa su primer Pokémon (índice 0)
         selected_pokemon.clone(),
     );
+
+    // Inicializar battle_stages para los Pokémon del jugador al entrar en batalla
+    if let Some(player_pokemon) = session.team.active_members.get_mut(0) {
+        if player_pokemon.battle_stages.is_none() {
+            player_pokemon.init_battle_stages();
+        }
+    }
 
     // Añadir mensaje inicial al log
     battle_state.add_log(format!(
