@@ -2,6 +2,8 @@ import {
   GameSession,
   PokemonInstance,
   TurnResult,
+  FieldPosition,
+  Move,
 } from './types';
 
 // El proxy de Vite redirige /api a http://localhost:3000/api
@@ -29,12 +31,14 @@ export const api = {
     gym_interval?: number;
     total_encounters?: number;
     chaos_move_randomizer?: boolean;
+    preferred_format?: 'Single' | 'Double';
   }): Promise<NewGameResponse> {
     const payload: {
       generations?: number[];
       gym_interval?: number;
       total_encounters?: number;
       chaos_move_randomizer?: boolean;
+      preferred_format?: 'Single' | 'Double';
     } = {};
 
     if (config) {
@@ -49,6 +53,9 @@ export const api = {
       }
       if (config.chaos_move_randomizer !== undefined) {
         payload.chaos_move_randomizer = config.chaos_move_randomizer;
+      }
+      if (config.preferred_format !== undefined) {
+        payload.preferred_format = config.preferred_format;
       }
     }
 
@@ -152,27 +159,59 @@ export const api = {
   /**
    * Envía un movimiento en batalla
    */
-  async submitMove(sessionId: string, moveIndex: number): Promise<{
+  async submitMove(
+    sessionId: string,
+    moveInput: {
+      move_id: string;
+      user_index: number;
+      target_position?: FieldPosition | null;
+    }
+  ): Promise<{
     result: TurnResult;
     player_hp: number;
     enemy_hp: number;
     battle_over: boolean;
     player_won: boolean | null;
     session?: GameSession;
+    turn_executed: boolean;
+    pending_actions: number;
   }> {
+    // El backend espera los campos directamente en el nivel superior, no anidados en move_input
+    const payload = {
+      session_id: sessionId,
+      move_id: moveInput.move_id,
+      user_index: moveInput.user_index,
+      target_position: moveInput.target_position ?? null,
+    };
+    
+    console.log('[DEBUG] submitMove: Enviando payload:', payload);
+    
     const response = await fetch(`${API_BASE_URL}/game/battle/move`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        session_id: sessionId,
-        move_index: moveIndex,
-      }),
+      body: JSON.stringify(payload),
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to submit move: ${response.statusText}`);
+      // Intentar obtener más información del error
+      let errorMessage = `Failed to submit move: ${response.statusText}`;
+      try {
+        const errorBody = await response.text();
+        console.error('[DEBUG] submitMove: Error response body:', errorBody);
+        if (errorBody) {
+          try {
+            const errorJson = JSON.parse(errorBody);
+            errorMessage = `Failed to submit move: ${errorJson.message || errorJson.error || response.statusText}`;
+          } catch {
+            errorMessage = `Failed to submit move: ${response.statusText} - ${errorBody}`;
+          }
+        }
+      } catch (e) {
+        console.error('[DEBUG] submitMove: Error al leer el cuerpo de la respuesta:', e);
+      }
+      throw new Error(errorMessage);
     }
 
     return response.json();
@@ -281,6 +320,25 @@ export const api = {
     }
 
     return response.json();
+  },
+
+  /**
+   * Obtiene todos los movimientos disponibles
+   */
+  async getAllMoves(): Promise<Record<string, Move>> {
+    const response = await fetch(`${API_BASE_URL}/moves`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get moves: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.moves;
   },
 };
 

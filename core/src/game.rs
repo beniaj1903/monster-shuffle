@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
-use crate::models::PokemonInstance;
+use crate::models::{PokemonInstance, WeatherState, TerrainState, BattleFormat, FieldPosition};
+
+/// Acción pendiente de un Pokémon del jugador
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PendingPlayerAction {
+    /// Índice del Pokémon del jugador que ejecuta la acción
+    pub user_index: usize,
+    /// ID del movimiento seleccionado
+    pub move_id: String,
+    /// Posición del objetivo (si aplica)
+    pub target_position: Option<FieldPosition>,
+}
 
 /// Estado actual del juego (pantalla/contexto en el que está el usuario)
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -16,6 +27,8 @@ pub enum GameState {
     Battle,
     /// El usuario está en una batalla contra un líder de gimnasio
     GymBattle,
+    /// El usuario debe elegir un objeto de recompensa tras vencer a un Gym Leader
+    LootSelection,
     /// El usuario ha completado todos los encuentros (esperando PvP)
     Completed,
 }
@@ -30,6 +43,10 @@ pub struct GameConfig {
     /// Modo Chaos: Los movimientos se seleccionan aleatoriamente del pool global
     #[serde(default)]
     pub chaos_move_randomizer: bool,
+    /// Formato de batalla preferido (Single o Double)
+    /// Los encuentros salvajes siempre son Single, independientemente de este valor
+    #[serde(default)]
+    pub preferred_format: BattleFormat,
 }
 
 /// Equipo del jugador
@@ -96,6 +113,10 @@ pub struct GameSession {
     /// Opciones de encuentro generadas temporalmente (5 opciones)
     /// Se elimina después de que el usuario elija uno
     pub encounter_choices: Option<Vec<PokemonInstance>>,
+    /// Opciones de objetos de recompensa tras vencer a un Gym Leader (3 opciones)
+    /// Se elimina después de que el usuario elija uno
+    #[serde(default)]
+    pub loot_options: Option<Vec<String>>,
     /// Estado de batalla activa (si existe)
     pub battle: Option<BattleState>,
     /// Configuración de la partida
@@ -118,6 +139,7 @@ impl GameSession {
             team: PlayerTeam::new(),
             starter_choices: None,
             encounter_choices: None,
+            loot_options: None,
             battle: None,
             config,
             encounters_won: 0,
@@ -131,6 +153,7 @@ impl Default for GameConfig {
             gym_interval: 5,
             total_encounters: 20,
             chaos_move_randomizer: false,
+            preferred_format: BattleFormat::Single,
         }
     }
 }
@@ -149,16 +172,21 @@ pub struct ExploreResponse {
 /// Estado de una batalla activa
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BattleState {
-    /// Índice del Pokémon activo del jugador en su equipo (0-5)
-    pub player_active_index: usize,
+    /// Formato de batalla (Single o Double)
+    #[serde(default)]
+    pub format: BattleFormat,
+    /// Índices en el equipo del jugador que están actualmente en el campo
+    /// Size 1 para Single, size 2 para Double
+    pub player_active_indices: Vec<usize>,
     /// Instancia del Pokémon enemigo (salvaje) - usado solo si is_trainer_battle = false
     pub opponent_instance: PokemonInstance,
     /// Indica si es una batalla contra un entrenador (líder de gimnasio)
     pub is_trainer_battle: bool,
     /// Equipo del oponente (usado solo si is_trainer_battle = true)
     pub opponent_team: Vec<PokemonInstance>,
-    /// Índice del Pokémon activo del oponente en su equipo (0-5)
-    pub opponent_active_index: usize,
+    /// Índices en el equipo del oponente que están actualmente en el campo
+    /// Size 1 para Single, size 2 para Double
+    pub opponent_active_indices: Vec<usize>,
     /// Nombre del entrenador oponente (si es batalla de entrenador)
     pub opponent_name: Option<String>,
     /// Contador de turnos (inicia en 1)
@@ -166,54 +194,121 @@ pub struct BattleState {
     /// Historial de acciones en la batalla
     /// Ejemplos: "Pikachu usó Rayo", "El enemigo usó Placaje"
     pub log: Vec<String>,
+    /// Estado del clima en batalla (None al comenzar)
+    #[serde(default)]
+    pub weather: Option<WeatherState>,
+    /// Estado del terreno en batalla (None al comenzar)
+    #[serde(default)]
+    pub terrain: Option<TerrainState>,
+    /// Acciones pendientes del jugador para este turno (en dobles, se necesitan 2)
+    #[serde(default)]
+    pub pending_player_actions: Vec<PendingPlayerAction>,
 }
 
 impl BattleState {
-    /// Crea un nuevo estado de batalla contra un Pokémon salvaje
+    /// Crea un nuevo estado de batalla contra un Pokémon salvaje (formato Single)
     pub fn new(player_active_index: usize, opponent_instance: PokemonInstance) -> Self {
         Self {
-            player_active_index,
+            format: BattleFormat::Single,
+            player_active_indices: vec![player_active_index],
             opponent_instance,
             is_trainer_battle: false,
             opponent_team: Vec::new(),
-            opponent_active_index: 0,
+            opponent_active_indices: vec![0],
             opponent_name: None,
             turn_counter: 1,
             log: Vec::new(),
+            weather: None,
+            terrain: None,
+            pending_player_actions: Vec::new(),
         }
     }
 
     /// Crea un nuevo estado de batalla contra un entrenador
+    /// 
+    /// # Parámetros
+    /// - `player_active_index`: Índice del primer Pokémon del jugador
+    /// - `opponent_team`: Equipo del oponente
+    /// - `opponent_name`: Nombre del oponente
+    /// - `format`: Formato de batalla (Single o Double)
+    /// 
+    /// # Nota
+    /// Si el formato es Double, se espera que el jugador tenga al menos 2 Pokémon.
+    /// Si solo tiene 1, se usará Single automáticamente.
     pub fn new_trainer_battle(
         player_active_index: usize,
         opponent_team: Vec<PokemonInstance>,
         opponent_name: String,
+        format: BattleFormat,
     ) -> Self {
+        // Determinar los índices activos según el formato
+        let (player_indices, opponent_indices) = match format {
+            BattleFormat::Single => {
+                (vec![player_active_index], vec![0])
+            }
+            BattleFormat::Double => {
+                // En dobles, usar el primer y segundo Pokémon (si existen)
+                let player_indices = if player_active_index == 0 {
+                    vec![0, 1] // Asumir que el segundo está en índice 1
+                } else {
+                    vec![player_active_index, player_active_index + 1] // O el siguiente
+                };
+                let opponent_indices = if opponent_team.len() >= 2 {
+                    vec![0, 1]
+                } else {
+                    vec![0] // Si el oponente solo tiene 1, usar Single
+                };
+                (player_indices, opponent_indices)
+            }
+        };
+        
+        // Si el formato es Double pero no hay suficientes Pokémon, forzar Single
+        let final_format = if format == BattleFormat::Double && (player_indices.len() < 2 || opponent_indices.len() < 2) {
+            BattleFormat::Single
+        } else {
+            format
+        };
+        
+        // Ajustar índices si se forzó Single
+        let (final_player_indices, final_opponent_indices) = if final_format == BattleFormat::Single {
+            (vec![player_active_index], vec![0])
+        } else {
+            (player_indices, opponent_indices)
+        };
+        
         Self {
-            player_active_index,
+            format: final_format,
+            player_active_indices: final_player_indices,
             opponent_instance: opponent_team[0].clone(), // Para compatibilidad, usar el primero
             is_trainer_battle: true,
             opponent_team,
-            opponent_active_index: 0,
+            opponent_active_indices: final_opponent_indices,
             opponent_name: Some(opponent_name),
             turn_counter: 1,
             log: Vec::new(),
+            weather: None,
+            terrain: None,
+            pending_player_actions: Vec::new(),
         }
     }
 
-    /// Obtiene el Pokémon activo del oponente
+    /// Obtiene el Pokémon activo del oponente (primero en la lista de activos)
+    /// Para compatibilidad con código existente que espera un solo Pokémon
     pub fn get_opponent_active(&self) -> &PokemonInstance {
         if self.is_trainer_battle {
-            &self.opponent_team[self.opponent_active_index]
+            let index = self.opponent_active_indices.first().copied().unwrap_or(0);
+            &self.opponent_team[index]
         } else {
             &self.opponent_instance
         }
     }
 
-    /// Obtiene una referencia mutable al Pokémon activo del oponente
+    /// Obtiene una referencia mutable al Pokémon activo del oponente (primero en la lista de activos)
+    /// Para compatibilidad con código existente que espera un solo Pokémon
     pub fn get_opponent_active_mut(&mut self) -> &mut PokemonInstance {
         if self.is_trainer_battle {
-            &mut self.opponent_team[self.opponent_active_index]
+            let index = self.opponent_active_indices.first().copied().unwrap_or(0);
+            &mut self.opponent_team[index]
         } else {
             &mut self.opponent_instance
         }
@@ -223,7 +318,8 @@ impl BattleState {
     /// Útil para mantener sincronización con el frontend
     pub fn sync_opponent_instance(&mut self) {
         if self.is_trainer_battle && !self.opponent_team.is_empty() {
-            self.opponent_instance = self.opponent_team[self.opponent_active_index].clone();
+            let index = self.opponent_active_indices.first().copied().unwrap_or(0);
+            self.opponent_instance = self.opponent_team[index].clone();
         }
     }
 
@@ -250,19 +346,30 @@ impl BattleState {
             return false;
         }
 
-        // Buscar el siguiente Pokémon con HP > 0 (excluyendo el actual)
-        for i in (self.opponent_active_index + 1)..self.opponent_team.len() {
+        // Buscar el siguiente Pokémon con HP > 0 (excluyendo los actuales)
+        let current_index = self.opponent_active_indices.first().copied().unwrap_or(0);
+        for i in (current_index + 1)..self.opponent_team.len() {
             if self.opponent_team[i].current_hp > 0 {
-                self.opponent_active_index = i;
+                // Actualizar el primer slot (en Single solo hay uno)
+                if let Some(first) = self.opponent_active_indices.first_mut() {
+                    *first = i;
+                } else {
+                    self.opponent_active_indices.push(i);
+                }
                 self.sync_opponent_instance();
                 return true;
             }
         }
 
         // Si no hay más adelante, buscar desde el principio (excluyendo el actual)
-        for i in 0..self.opponent_active_index {
+        for i in 0..current_index {
             if self.opponent_team[i].current_hp > 0 {
-                self.opponent_active_index = i;
+                // Actualizar el primer slot (en Single solo hay uno)
+                if let Some(first) = self.opponent_active_indices.first_mut() {
+                    *first = i;
+                } else {
+                    self.opponent_active_indices.push(i);
+                }
                 self.sync_opponent_instance();
                 return true;
             }

@@ -1,0 +1,50 @@
+[
+  {
+    "id": "choice-band",
+    "name": "Choice band",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/choice-band.png",
+    "effect_text": "Held: Increases Attack by 50%, but restricts the holder to only one move."
+  },
+  {
+    "id": "choice-scarf",
+    "name": "Choice scarf",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/choice-scarf.png",
+    "effect_text": "Held: Increases Speed by 50%, but restricts the holder to only one move."
+  },
+  {
+    "id": "choice-specs",
+    "name": "Choice specs",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/choice-specs.png",
+    "effect_text": "Held: Increases Special Attack by 50%, but restricts the holder to only one move."
+  },
+  {
+    "id": "focus-sash",
+    "name": "Focus sash",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/focus-sash.png",
+    "effect_text": "Held: Holder survives any single-hit attack at 1 HP if at max HP, then the item is consumed."
+  },
+  {
+    "id": "leftovers",
+    "name": "Leftovers",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/leftovers.png",
+    "effect_text": "Held: Restores 1/16 (6.25%) holder’s max HP at the end of each turn."
+  },
+  {
+    "id": "life-orb",
+    "name": "Life orb",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/life-orb.png",
+    "effect_text": "Held: Holder’s moves inflict 30% extra damage, but cost 10% max HP."
+  },
+  {
+    "id": "rocky-helmet",
+    "name": "Rocky helmet",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/rocky-helmet.png",
+    "effect_text": "Held: When the holder is hit by a contact move, the attacking Pokémon takes 1/6 its max HP in damage."
+  },
+  {
+    "id": "sitrus-berry",
+    "name": "Sitrus berry",
+    "sprite_url": "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/items/sitrus-berry.png",
+    "effect_text": "Held: Consumed at 1/2 max HP to recover 1/4 max HP."
+  }
+]

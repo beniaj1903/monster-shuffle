@@ -2,7 +2,7 @@ use rand::rngs::StdRng;
 use rand::{seq::SliceRandom, Rng, SeedableRng};
 
 use crate::models::{
-    MoveInstance, PokemonInstance, PokemonSpecies, RandomizedProfile, StatModifiers, Stats,
+    LearnedMove, MoveInstance, PokemonInstance, PokemonSpecies, RandomizedProfile, StatModifiers, Stats,
 };
 
 // NOTA: Se eliminaron las constantes y funciones de randomización de tipos (Vanilla behavior)
@@ -102,9 +102,20 @@ fn roll_chaos_moves(rng: &mut StdRng, global_move_pool: &[String]) -> Vec<MoveIn
     selected
 }
 
-fn roll_ability_id(rng: &mut StdRng) -> String {
-    // Placeholder para futura implementación de habilidades reales
-    format!("ability-{:04}", rng.gen_range(0..=100))
+/// Selecciona una habilidad aleatoria de las posibles habilidades de la especie
+/// Prioriza habilidades no-hidden (slot 1 o 2), pero puede incluir hidden si no hay otras
+fn roll_ability_id(species: &PokemonSpecies, rng: &mut StdRng) -> String {
+    if species.possible_abilities.is_empty() {
+        // Fallback si no hay habilidades definidas
+        return "none".to_string();
+    }
+    
+    // Seleccionar una habilidad aleatoria de las disponibles
+    use rand::seq::SliceRandom;
+    species.possible_abilities
+        .choose(rng)
+        .cloned()
+        .unwrap_or_else(|| "none".to_string())
 }
 
 fn roll_instance_id(rng: &mut StdRng) -> String {
@@ -118,12 +129,16 @@ fn roll_instance_id(rng: &mut StdRng) -> String {
 /// 
 /// Si `chaos_mode` es true, los movimientos se seleccionan aleatoriamente del `global_move_pool`.
 /// Si es false, se usan los movimientos del `species.move_pool` (comportamiento vanilla).
+/// 
+/// `moves_data` es un HashMap opcional con los datos de los movimientos para inicializar el PP.
+/// Si es None, los movimientos se crearán con PP 0 y se inicializarán cuando se usen.
 pub fn create_pokemon_instance(
     species: &PokemonSpecies,
     level: u8,
     seed: u64,
     chaos_mode: bool,
     global_move_pool: &[String],
+    moves_data: Option<&std::collections::HashMap<String, crate::models::MoveData>>,
 ) -> PokemonInstance {
     let mut rng = StdRng::seed_from_u64(seed);
 
@@ -140,7 +155,24 @@ pub fn create_pokemon_instance(
         roll_moves(&mut rng, &species.move_pool)
     };
     
-    let rolled_ability_id = roll_ability_id(&mut rng);
+    // Crear learned_moves con PP inicializado si tenemos los datos
+    let learned_moves: Vec<LearnedMove> = moves.iter()
+        .map(|move_instance| {
+            let max_pp = moves_data
+                .and_then(|data| data.get(&move_instance.template_id))
+                .map(|move_data| move_data.pp)
+                .unwrap_or(0); // Si no tenemos los datos, inicializar con 0 (se inicializará después)
+            
+            LearnedMove {
+                move_id: move_instance.template_id.clone(),
+                current_pp: max_pp,
+                max_pp,
+            }
+        })
+        .collect();
+    
+    let rolled_ability_id = roll_ability_id(species, &mut rng);
+    let ability = rolled_ability_id.clone(); // La habilidad activa es la misma que la rolled
     let id = roll_instance_id(&mut rng);
 
     // Perfil "Randomizado" coincide con el original
@@ -149,6 +181,7 @@ pub fn create_pokemon_instance(
         rolled_secondary_type: species.secondary_type,
         rolled_ability_id,
         stat_modifiers: StatModifiers::default(),
+        learned_moves,
         moves,
     };
 
@@ -158,7 +191,10 @@ pub fn create_pokemon_instance(
         level,
         current_hp: base_computed_stats.hp,
         status_condition: None,
-        battle_stages: None, // Se inicializa cuando entra en batalla
+        ability,
+        held_item: None, // Por defecto sin objeto, se puede asignar después
+        battle_stages: None,
+        volatile_status: None, // Se inicializa cuando entra en batalla
         individual_values: ivs,
         effort_values: evs,
         base_computed_stats,
@@ -193,6 +229,7 @@ mod tests {
                 "razor-leaf".into(),
                 "sleep-powder".into(),
             ],
+            possible_abilities: vec!["overgrow".into(), "chlorophyll".into()],
             is_starter_candidate: false,
             evolutions: Vec::new(),
         }
@@ -207,8 +244,8 @@ mod tests {
     fn deterministic_with_same_seed() {
         let species = sample_species();
         let empty_pool: Vec<String> = Vec::new();
-        let a = create_pokemon_instance(&species, 30, 12345, false, &empty_pool);
-        let b = create_pokemon_instance(&species, 30, 12345, false, &empty_pool);
+        let a = create_pokemon_instance(&species, 30, 12345, false, &empty_pool, None);
+        let b = create_pokemon_instance(&species, 30, 12345, false, &empty_pool, None);
         assert_eq!(a, b, "Same seed should produce identical instance");
     }
 
@@ -216,8 +253,8 @@ mod tests {
     fn different_seed_changes_output() {
         let species = sample_species();
         let empty_pool: Vec<String> = Vec::new();
-        let a = create_pokemon_instance(&species, 30, 12345, false, &empty_pool);
-        let b = create_pokemon_instance(&species, 30, 54321, false, &empty_pool);
+        let a = create_pokemon_instance(&species, 30, 12345, false, &empty_pool, None);
+        let b = create_pokemon_instance(&species, 30, 54321, false, &empty_pool, None);
         assert_ne!(a, b, "Different seed should change the generated instance");
     }
 
@@ -225,7 +262,7 @@ mod tests {
     fn types_remain_vanilla() {
         let species = sample_species();
         let empty_pool: Vec<String> = Vec::new();
-        let instance = create_pokemon_instance(&species, 30, 999, false, &empty_pool);
+        let instance = create_pokemon_instance(&species, 30, 999, false, &empty_pool, None);
         assert_eq!(instance.randomized_profile.rolled_primary_type, species.primary_type);
         assert_eq!(instance.randomized_profile.rolled_secondary_type, species.secondary_type);
     }
@@ -234,7 +271,7 @@ mod tests {
     fn moves_come_from_pool_and_limit_four() {
         let species = sample_species();
         let empty_pool: Vec<String> = Vec::new();
-        let instance = create_pokemon_instance(&species, 30, 42, false, &empty_pool);
+        let instance = create_pokemon_instance(&species, 30, 42, false, &empty_pool, None);
         assert!(instance.randomized_profile.moves.len() <= 4);
         for mv in &instance.randomized_profile.moves {
             assert!(
@@ -246,14 +283,19 @@ mod tests {
     }
 
     #[test]
-    fn ability_placeholder_has_prefix() {
+    fn ability_selected_from_species_pool() {
         let species = sample_species();
         let empty_pool: Vec<String> = Vec::new();
-        let instance = create_pokemon_instance(&species, 30, 7, false, &empty_pool);
+        let instance = create_pokemon_instance(&species, 30, 7, false, &empty_pool, None);
+        // La habilidad debe venir de las posibles habilidades de la especie
         assert!(
-            instance.randomized_profile.rolled_ability_id.starts_with("ability-"),
-            "Ability id should use placeholder prefix"
+            species.possible_abilities.contains(&instance.ability),
+            "Ability '{}' should be one of the species' possible abilities: {:?}",
+            instance.ability,
+            species.possible_abilities
         );
+        // También debe coincidir con rolled_ability_id
+        assert_eq!(instance.ability, instance.randomized_profile.rolled_ability_id);
     }
 
     #[test]
@@ -261,7 +303,7 @@ mod tests {
         let species = sample_species();
         let level = 50;
         let empty_pool: Vec<String> = Vec::new();
-        let instance = create_pokemon_instance(&species, level, 2024, false, &empty_pool);
+        let instance = create_pokemon_instance(&species, level, 2024, false, &empty_pool, None);
         let expected_hp = compute_expected_hp(
             species.base_stats.hp,
             instance.individual_values.hp,

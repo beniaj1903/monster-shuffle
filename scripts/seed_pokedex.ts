@@ -67,6 +67,14 @@ interface PokeApiPokemon {
       name: string;
     };
   }>;
+  abilities: Array<{
+    ability: {
+      name: string;
+      url: string;
+    };
+    is_hidden: boolean;
+    slot: number;
+  }>;
   moves: Array<{
     move: {
       name: string;
@@ -110,6 +118,7 @@ interface PokemonSpeciesOutput {
     speed: number;
   };
   move_pool: string[];
+  possible_abilities: string[];
   is_starter_candidate: boolean;
   evolutions: EvolutionDataOutput[];
 }
@@ -416,6 +425,9 @@ async function fetchPokemonData(
     // Extraer movimientos
     const movePool = extractLevelUpMoves(pokemon.moves);
 
+    // Extraer habilidades (solo las no-hidden por defecto, pero guardamos todas)
+    const possibleAbilities = pokemon.abilities.map(ability => ability.ability.name);
+
     // Extraer información de evolución
     let isStarterCandidate = false;
     let evolutions: EvolutionDataOutput[] = [];
@@ -452,6 +464,7 @@ async function fetchPokemonData(
       secondary_type: secondaryType,
       base_stats: baseStats,
       move_pool: movePool,
+      possible_abilities: possibleAbilities,
       is_starter_candidate: isStarterCandidate,
       evolutions: evolutions,
     };

@@ -2,7 +2,7 @@ mod handlers;
 mod state;
 
 use axum::{routing::{get, post}, Router};
-use handlers::{game, battle, management};
+use handlers::{game, battle, management, moves};
 use state::{load_pokedex, load_moves, AppState};
 use tower_http::cors::{CorsLayer, Any};
 use tower_http::trace::TraceLayer;
@@ -74,6 +74,8 @@ async fn main() {
         .route("/api/game/team/reorder", post(management::reorder_team))
         .route("/api/game/pokemon/move-reorder", post(management::reorder_moves))
         .route("/api/game/pokemon/evolve", post(management::evolve_pokemon))
+        .route("/api/game/select-loot", post(game::select_loot))
+        .route("/api/moves", get(moves::get_all_moves))
         .layer(trace_layer)
         .layer(cors)
         .with_state(state);

@@ -7,6 +7,7 @@ export interface Move {
   accuracy?: number | null;
   pp?: number;
   damage_class?: string;
+  target?: string; // Tipo de objetivo del movimiento (ej: "selected-pokemon", "user", "all-opponents")
 }
 
 // Especie de Pokémon
@@ -51,6 +52,8 @@ export interface PokemonInstance {
   level: number;
   current_hp: number;
   status_condition: 'Burn' | 'Freeze' | 'Paralysis' | 'Poison' | 'BadPoison' | 'Sleep' | null;
+  ability: string; // ID de la habilidad activa (ej: "blaze", "intimidate", "levitate")
+  held_item: string | null; // ID del objeto equipado (ej: "leftovers", "life-orb")
   battle_stages: StatStages | null; // Puede ser null si el pokemon no ha entrado en combate
   individual_values: {
     hp: number;
@@ -90,19 +93,54 @@ export interface PokemonInstance {
       power_variation: number | null;
       accuracy_multiplier: number | null;
     }>;
+    learned_moves: Array<{
+      move_id: string;
+      current_pp: number;
+      max_pp: number;
+    }>;
   };
 }
 
+// Tipo de clima en batalla
+export type WeatherType = 'Sun' | 'Rain' | 'Sandstorm' | 'Hail' | 'None';
+
+// Estado del clima en batalla
+export interface WeatherState {
+  weather_type: WeatherType;
+  turns_remaining: number;
+}
+
+// Tipo de terreno en batalla
+export type TerrainType = 'Electric' | 'Grassy' | 'Misty' | 'Psychic';
+
+// Estado del terreno en batalla
+export interface TerrainState {
+  terrain_type: TerrainType;
+  turns_remaining: number;
+}
+
+// Formato de batalla
+export type BattleFormat = 'Single' | 'Double';
+
+// Posición en el campo de batalla
+export type FieldPosition = 'PlayerLeft' | 'PlayerRight' | 'OpponentLeft' | 'OpponentRight';
+
 // Estado de batalla
 export interface BattleState {
-  player_active_index: number;
+  format: BattleFormat; // Formato de batalla (Single o Double)
+  player_active_indices: number[]; // Índices de los Pokémon activos del jugador
   opponent_instance: PokemonInstance;
   is_trainer_battle: boolean;
   opponent_team: PokemonInstance[];
-  opponent_active_index: number;
+  opponent_active_indices: number[]; // Índices de los Pokémon activos del oponente
   opponent_name: string | null;
   turn_counter: number;
   log: string[]; // Historial de lo que pasó en el turno
+  weather: WeatherState | null; // Clima activo en la batalla
+  terrain: TerrainState | null; // Terreno activo en la batalla
+  // Campos de compatibilidad (deprecated, usar player_active_indices y opponent_active_indices)
+  player_active_index?: number;
+  opponent_active_index?: number;
 }
 
 // Resultado de un turno
@@ -121,6 +159,7 @@ export type GameState =
   | 'TeamManagement' 
   | 'Battle' 
   | 'GymBattle' 
+  | 'LootSelection'
   | 'Completed';
 
 // Configuración de la partida
@@ -139,6 +178,7 @@ export interface GameSession {
   };
   starter_choices: PokemonInstance[] | null;
   encounter_choices: PokemonInstance[] | null;
+  loot_options: string[] | null; // IDs de objetos de recompensa (ej: ["leftovers", "life-orb", "choice-band"])
   battle: BattleState | null;
   config: GameConfig;
   encounters_won: number;

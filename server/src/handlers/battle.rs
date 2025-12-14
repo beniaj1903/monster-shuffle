@@ -1,10 +1,11 @@
 use axum::{extract::State, http::StatusCode, response::Json};
-use core::battle::{execute_enemy_attack, execute_turn, TurnResult};
+use core::battle::{execute_enemy_attack, execute_turn, trigger_on_entry_abilities, TurnResult, initialize_move_pp, has_moves_with_pp, create_struggle_move};
 use core::experience::apply_victory_level_up;
-use core::game::{GameSession, GameState};
+use core::game::{GameSession, GameState, PendingPlayerAction};
+use core::models::FieldPosition;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
@@ -13,8 +14,12 @@ use crate::state::AppState;
 #[derive(Deserialize, Debug)]
 pub struct SubmitMoveRequest {
     pub session_id: String,
-    /// Índice del movimiento elegido (0-3)
-    pub move_index: usize,
+    /// ID del movimiento seleccionado
+    pub move_id: String,
+    /// Índice del Pokémon del jugador que ejecuta la acción (0-1 en dobles)
+    pub user_index: usize,
+    /// Posición del objetivo (si aplica, para movimientos "selected-pokemon")
+    pub target_position: Option<FieldPosition>,
 }
 
 /// Respuesta del endpoint de batalla
@@ -27,6 +32,10 @@ pub struct SubmitMoveResponse {
     pub player_won: Option<bool>,
     /// Sesión actualizada (solo cuando la batalla termina)
     pub session: Option<GameSession>,
+    /// Indica si el turno se ejecutó o si faltan más acciones (en dobles)
+    pub turn_executed: bool,
+    /// Número de acciones pendientes (0 si el turno se ejecutó)
+    pub pending_actions: usize,
 }
 
 /// Handler para ejecutar un movimiento en batalla
@@ -38,67 +47,247 @@ pub async fn submit_move(
     State(state): State<AppState>,
     Json(payload): Json<SubmitMoveRequest>,
 ) -> Result<Json<SubmitMoveResponse>, StatusCode> {
+    eprintln!("[DEBUG] submit_move: ===== INICIO submit_move =====");
+    eprintln!("[DEBUG] submit_move: Payload recibido completo: {:?}", payload);
+    eprintln!("[DEBUG] submit_move: session_id: {}", payload.session_id);
+    eprintln!("[DEBUG] submit_move: move_id: {}", payload.move_id);
+    eprintln!("[DEBUG] submit_move: user_index: {}", payload.user_index);
+    eprintln!("[DEBUG] submit_move: target_position: {:?}", payload.target_position);
+    
     // Buscar la sesión
-    let mut session = state
-        .sessions
-        .get(&payload.session_id)
-        .ok_or(StatusCode::NOT_FOUND)?
-        .clone();
+    let mut session = match state.sessions.get(&payload.session_id) {
+        Some(s) => {
+            eprintln!("[DEBUG] submit_move: Sesión encontrada");
+            s.clone()
+        }
+        None => {
+            eprintln!("[DEBUG] submit_move: ERROR - Sesión no encontrada: {}", payload.session_id);
+            return Err(StatusCode::NOT_FOUND);
+        }
+    };
+    
+    eprintln!("[DEBUG] submit_move: Sesión estado: {:?}", session.state);
 
     // Validar que esté en estado de batalla (normal o gimnasio)
     if session.state != GameState::Battle && session.state != GameState::GymBattle {
+        eprintln!("[DEBUG] submit_move: ERROR - Estado inválido: {:?} (esperado Battle o GymBattle)", session.state);
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Obtener el estado de batalla (clonar para poder modificarlo)
-    let mut battle_state = session
-        .battle
-        .clone()
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let mut battle_state = match session.battle.clone() {
+        Some(bs) => {
+            eprintln!("[DEBUG] submit_move: BattleState encontrado");
+            bs
+        }
+        None => {
+            eprintln!("[DEBUG] submit_move: ERROR - No hay BattleState en la sesión");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    };
+    
+    eprintln!("[DEBUG] submit_move: player_active_indices: {:?}", battle_state.player_active_indices);
+    eprintln!("[DEBUG] submit_move: player_active_indices.len(): {}", battle_state.player_active_indices.len());
 
-    // Obtener el Pokémon activo del jugador
-    let player_active_index = battle_state.player_active_index;
+    // Validar que user_index corresponde a un Pokémon activo
+    if payload.user_index >= battle_state.player_active_indices.len() {
+        eprintln!("[DEBUG] submit_move: ERROR - user_index ({}) >= player_active_indices.len() ({})", 
+            payload.user_index, battle_state.player_active_indices.len());
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let player_active_index = battle_state.player_active_indices[payload.user_index];
+    eprintln!("[DEBUG] submit_move: player_active_index (del array): {}", player_active_index);
+    eprintln!("[DEBUG] submit_move: session.team.active_members.len(): {}", session.team.active_members.len());
+    
     if player_active_index >= session.team.active_members.len() {
+        eprintln!("[DEBUG] submit_move: ERROR - player_active_index ({}) >= active_members.len() ({})", 
+            player_active_index, session.team.active_members.len());
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Validación: Verificar que el Pokémon activo no esté debilitado
-    if session.team.active_members[player_active_index].current_hp == 0 {
+    let player_hp = session.team.active_members[player_active_index].current_hp;
+    eprintln!("[DEBUG] submit_move: HP del Pokémon activo: {}", player_hp);
+    if player_hp == 0 {
+        eprintln!("[DEBUG] submit_move: ERROR - Pokémon activo está debilitado (HP = 0)");
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let mut player_mon = session.team.active_members[player_active_index].clone();
-    let mut enemy_mon = battle_state.get_opponent_active().clone();
+    let player_mon = &session.team.active_members[player_active_index];
+    eprintln!("[DEBUG] submit_move: Pokémon activo: {} (HP: {})", player_mon.species.display_name, player_mon.current_hp);
+    
+    // Verificar si el movimiento existe y tiene PP disponible
+    let player_has_pp = has_moves_with_pp(player_mon);
+    eprintln!("[DEBUG] submit_move: ¿Tiene movimientos con PP?: {}", player_has_pp);
+    let move_id = if !player_has_pp {
+        eprintln!("[DEBUG] submit_move: Sin PP disponible, forzando Struggle");
+        "struggle".to_string()
+    } else {
+        // Verificar que el movimiento existe en los movimientos aprendidos
+        let active_learned_moves = player_mon.get_active_learned_moves();
+        let found_move = active_learned_moves.iter()
+            .find(|m| m.move_id == payload.move_id);
+        
+        if let Some(learned_move) = found_move {
+            eprintln!("[DEBUG] submit_move: Movimiento {} encontrado, PP: {}/{}", payload.move_id, learned_move.current_pp, learned_move.max_pp);
+            // Verificar PP
+            if learned_move.current_pp == 0 {
+                eprintln!("[DEBUG] submit_move: Movimiento sin PP, forzando Struggle");
+                "struggle".to_string()
+            } else {
+                payload.move_id.clone()
+            }
+        } else {
+            eprintln!("[DEBUG] submit_move: Movimiento {} no encontrado en movimientos aprendidos, forzando Struggle", payload.move_id);
+            // Movimiento no encontrado, usar Struggle
+            "struggle".to_string()
+        }
+    };
+    eprintln!("[DEBUG] submit_move: Movimiento final a usar: {}", move_id);
 
-    // Obtener el movimiento elegido por el jugador
-    // Solo permitir seleccionar entre los primeros 4 movimientos activos
-    let active_moves = player_mon.get_active_moves();
-    if payload.move_index >= active_moves.len() {
-        return Err(StatusCode::BAD_REQUEST);
+    // Crear la acción pendiente
+    let action = PendingPlayerAction {
+        user_index: payload.user_index,
+        move_id: move_id.clone(),
+        target_position: payload.target_position,
+    };
+
+    // Agregar o reemplazar la acción para este Pokémon
+    // Si ya existe una acción para este user_index, reemplazarla
+    battle_state.pending_player_actions.retain(|a| a.user_index != payload.user_index);
+    battle_state.pending_player_actions.push(action);
+    
+    eprintln!("[DEBUG] submit_move: Acciones pendientes después de agregar: {}", battle_state.pending_player_actions.len());
+    for (i, action) in battle_state.pending_player_actions.iter().enumerate() {
+        eprintln!("[DEBUG] submit_move:   Acción {}: user_index={}, move_id={}, target={:?}", 
+            i + 1, action.user_index, action.move_id, action.target_position);
     }
 
-    let player_move_id = &active_moves[payload.move_index].template_id;
-    let player_move = state
-        .moves
-        .get(player_move_id)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // IA Enemiga: Elegir un movimiento aleatorio del enemigo
-    // Solo usar los primeros 4 movimientos activos
-    let enemy_active_moves = enemy_mon.get_active_moves();
-    if enemy_active_moves.is_empty() {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    // Verificar si todas las acciones están listas
+    let required_actions = battle_state.player_active_indices.len();
+    let pending_count = battle_state.pending_player_actions.len();
+    
+    eprintln!("[DEBUG] submit_move: Acciones requeridas: {}, Pendientes: {}", required_actions, pending_count);
+    
+    // Si no todas las acciones están listas, retornar sin ejecutar el turno
+    if pending_count < required_actions {
+        eprintln!("[DEBUG] submit_move: Faltan acciones, esperando más... (faltan: {})", required_actions - pending_count);
+        session.battle = Some(battle_state.clone());
+        state.sessions.insert(payload.session_id.clone(), session.clone());
+        return Ok(Json(SubmitMoveResponse {
+            result: TurnResult::new(),
+            player_hp: player_mon.current_hp,
+            enemy_hp: battle_state.get_opponent_active().current_hp,
+            battle_over: false,
+            player_won: None,
+            session: None,
+            turn_executed: false,
+            pending_actions: required_actions - pending_count,
+        }));
     }
 
+    // Todas las acciones están listas, ejecutar el turno
+    eprintln!("[DEBUG] submit_move: Todas las acciones están listas, ejecutando turno...");
     let mut rng = StdRng::from_entropy();
     
-    // Si es batalla contra entrenador, usar el Pokémon activo del oponente
-    let enemy_move_index = rng.gen_range(0..enemy_active_moves.len());
-    let enemy_move_id = &enemy_active_moves[enemy_move_index].template_id;
-    let enemy_move = state
-        .moves
-        .get(enemy_move_id)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Obtener las acciones del jugador (ordenadas por user_index)
+    battle_state.pending_player_actions.sort_by_key(|a| a.user_index);
+    eprintln!("[DEBUG] submit_move: Acciones ordenadas para ejecución:");
+    for (i, action) in battle_state.pending_player_actions.iter().enumerate() {
+        eprintln!("[DEBUG] submit_move:   {}: user_index={}, move_id={}, target={:?}", 
+            i + 1, action.user_index, action.move_id, action.target_position);
+    }
+    
+    // Inicializar PP para todos los Pokémon activos del jugador
+    for action in &battle_state.pending_player_actions {
+        let player_index = battle_state.player_active_indices[action.user_index];
+        if player_index < session.team.active_members.len() {
+            let player_mon = &mut session.team.active_members[player_index];
+            if action.move_id != "struggle" {
+                if let Some(move_data) = state.moves.get(&action.move_id) {
+                    initialize_move_pp(player_mon, &action.move_id, move_data);
+                }
+            }
+        }
+    }
+    
+    // Para compatibilidad con execute_turn actual, usamos la primera acción
+    // execute_turn leerá las acciones pendientes desde battle_state
+    let first_action = &battle_state.pending_player_actions[0];
+    let first_player_index = battle_state.player_active_indices[first_action.user_index];
+    let mut player_mon = session.team.active_members[first_player_index].clone();
+    let mut enemy_mon = battle_state.get_opponent_active().clone();
+
+    // Determinar el movimiento del jugador (para compatibilidad con la firma actual)
+    let (player_move_template_id, use_struggle_player) = if first_action.move_id == "struggle" {
+        ("struggle".to_string(), true)
+    } else {
+        (first_action.move_id.clone(), false)
+    };
+
+    // IA Enemiga: Elegir un movimiento aleatorio del enemigo
+    // Primero inicializar PP de todos los movimientos del enemigo
+    let enemy_learned_moves = enemy_mon.get_active_learned_moves();
+    let enemy_move_ids: Vec<String> = enemy_learned_moves
+        .iter()
+        .map(|m| m.move_id.clone())
+        .collect();
+    
+    // Inicializar PP de todos los movimientos del enemigo
+    for move_id in &enemy_move_ids {
+        if let Some(move_data) = state.moves.get(move_id) {
+            initialize_move_pp(&mut enemy_mon, move_id, move_data);
+        }
+    }
+    
+    // Verificar si el enemigo tiene movimientos con PP disponible
+    let enemy_has_pp = has_moves_with_pp(&enemy_mon);
+    
+    // Determinar el movimiento del enemigo
+    let (enemy_move_template_id, use_struggle_enemy) = if !enemy_has_pp {
+        // Sin PP disponible: usar Struggle
+        ("struggle".to_string(), true)
+    } else {
+        // Filtrar movimientos con PP disponible
+        let enemy_learned_moves_after = enemy_mon.get_active_learned_moves();
+        let moves_with_pp: Vec<String> = enemy_learned_moves_after
+            .iter()
+            .filter(|m| m.current_pp > 0)
+            .map(|m| m.move_id.clone())
+            .collect();
+        
+        if moves_with_pp.is_empty() {
+            // No hay movimientos con PP, usar Struggle
+            ("struggle".to_string(), true)
+        } else {
+            // Seleccionar un movimiento aleatorio de los que tienen PP
+            let move_id = moves_with_pp.choose(&mut rng)
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            (move_id.clone(), false)
+        }
+    };
+    
+    // Obtener los MoveData (o crear Struggle)
+    let player_move = if use_struggle_player {
+        create_struggle_move()
+    } else {
+        state
+            .moves
+            .get(&player_move_template_id)
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .clone()
+    };
+    
+    let enemy_move = if use_struggle_enemy {
+        create_struggle_move()
+    } else {
+        state
+            .moves
+            .get(&enemy_move_template_id)
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+            .clone()
+    };
 
     // Inicializar battle_stages si no están inicializados (al entrar en batalla)
     if player_mon.battle_stages.is_none() {
@@ -109,17 +298,25 @@ pub async fn submit_move(
     }
 
     // Ejecutar el turno
+    eprintln!("[DEBUG] submit_move: Llamando a execute_turn...");
+    // Pasar los MoveData para que execute_turn pueda construir los candidatos correctamente
     let turn_result = execute_turn(
         &mut player_mon,
         &mut enemy_mon,
-        player_move,
-        enemy_move,
+        &player_move,
+        &player_move_template_id,
+        &enemy_move,
+        &enemy_move_template_id,
         &session.team,
         player_active_index,
         &mut battle_state,
         &mut rng,
+        Some(&state.moves), // Pasar los MoveData para que execute_turn pueda usarlos
     );
 
+    eprintln!("[DEBUG] submit_move: Turno ejecutado, resultado: {:?}", turn_result.outcome);
+    eprintln!("[DEBUG] submit_move: HP después del turno - Player: {}, Enemy: {}", player_mon.current_hp, enemy_mon.current_hp);
+    
     // Actualizar los Pokémon en la sesión
     session.team.active_members[player_active_index] = player_mon.clone();
     
@@ -127,11 +324,19 @@ pub async fn submit_move(
     // Si cambió (EnemySwitched), el battle_state ya tiene el nuevo Pokémon activo
     if turn_result.outcome != core::battle::BattleOutcome::EnemySwitched {
         *battle_state.get_opponent_active_mut() = enemy_mon.clone();
+        eprintln!("[DEBUG] submit_move: Oponente actualizado en battle_state");
+    } else {
+        eprintln!("[DEBUG] submit_move: Oponente cambió, no actualizando enemy_mon (battle_state ya tiene el nuevo)");
     }
     // Si es EnemySwitched, el battle_state ya tiene el nuevo oponente activo
     // y enemy_mon sigue siendo el Pokémon anterior (debilitado), así que NO lo actualizamos
     
     battle_state.turn_counter += 1;
+    eprintln!("[DEBUG] submit_move: Contador de turnos: {}", battle_state.turn_counter);
+    
+    // Limpiar las acciones pendientes después de ejecutar el turno
+    battle_state.pending_player_actions.clear();
+    eprintln!("[DEBUG] submit_move: Acciones pendientes limpiadas");
 
     // Añadir logs al estado de batalla
     for log in &turn_result.logs {
@@ -152,6 +357,8 @@ pub async fn submit_move(
                 battle_over: false,
                 player_won: None,
                 session: None,
+                turn_executed: true,
+                pending_actions: 0,
             }));
         }
         core::battle::BattleOutcome::EnemySwitched => {
@@ -167,6 +374,28 @@ pub async fn submit_move(
                 opponent_name,
                 next_opponent.species.display_name
             ));
+
+            // Hook: Activar habilidades de entrada del nuevo Pokémon enemigo
+            let mut entry_logs = Vec::new();
+            let (weather_to_set, terrain_to_set) = {
+                let next_opponent_mut = battle_state.get_opponent_active_mut();
+                trigger_on_entry_abilities(&next_opponent, next_opponent_mut, &mut entry_logs)
+            };
+            // Establecer el weather si la habilidad lo activó
+            if let Some(weather) = weather_to_set {
+                battle_state.weather = Some(weather);
+            }
+            // Establecer el terrain si la habilidad lo activó
+            if let Some(terrain) = terrain_to_set {
+                battle_state.terrain = Some(terrain);
+            }
+            // Añadir logs de habilidades de entrada al battle_state
+            for log in &entry_logs {
+                battle_state.add_log(log.clone());
+            }
+            
+            // Obtener el oponente actualizado para el response
+            let next_opponent = battle_state.get_opponent_active().clone();
             session.battle = Some(battle_state.clone());
             // IMPORTANTE: Guardar la sesión antes de retornar
             state.sessions.insert(payload.session_id.clone(), session.clone());
@@ -177,6 +406,8 @@ pub async fn submit_move(
                 battle_over: false,
                 player_won: None,
                 session: None,
+                turn_executed: true,
+                pending_actions: 0,
             }));
         }
         core::battle::BattleOutcome::PlayerMustSwitch => {
@@ -198,6 +429,8 @@ pub async fn submit_move(
                 battle_over: false, // La batalla continúa, pero el jugador debe cambiar
                 player_won: None,
                 session: None,
+                turn_executed: true,
+                pending_actions: 0,
             }));
         }
         core::battle::BattleOutcome::PlayerWon => {
@@ -269,7 +502,11 @@ pub async fn submit_move(
                                 .choose(&mut rng)
                                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
                             
-                            pokemon.learn_new_move(random_move.clone());
+                            // Obtener max_pp del movimiento
+                            let max_pp = state.moves.get(random_move)
+                                .map(|md| md.pp)
+                                .unwrap_or(0);
+                            pokemon.learn_new_move(random_move.clone(), max_pp);
                             moves_learned = true;
                         }
                     }
@@ -326,7 +563,11 @@ pub async fn submit_move(
                             }
                             
                             if let Some(random_move) = available_moves.choose(&mut rng) {
-                                defeated_pokemon.learn_new_move(random_move.clone());
+                                // Obtener max_pp del movimiento
+                                let max_pp = state.moves.get(random_move)
+                                    .map(|md| md.pp)
+                                    .unwrap_or(0);
+                                defeated_pokemon.learn_new_move(random_move.clone(), max_pp);
                                 added_count += 1;
                             }
                         }
@@ -352,8 +593,38 @@ pub async fn submit_move(
             // Verificar si se completó la partida
             if session.encounters_won >= session.config.total_encounters {
                 session.state = GameState::Completed;
+            } else if is_gym_victory {
+                // Si es victoria de Gym, generar loot y cambiar a LootSelection
+                let available_items = vec![
+                    "leftovers",
+                    "life-orb",
+                    "choice-band",
+                    "choice-specs",
+                    "choice-scarf",
+                    "sitrus-berry",
+                    "rocky-helmet",
+                    "focus-sash",
+                ];
+                
+                let mut rng = StdRng::from_entropy();
+                let mut loot = Vec::new();
+                
+                // Seleccionar 3 objetos aleatorios únicos
+                let mut available_items_copy: Vec<String> = available_items.iter().map(|s| s.to_string()).collect();
+                for _ in 0..3.min(available_items_copy.len()) {
+                    if let Some(item) = available_items_copy.choose(&mut rng) {
+                        let item_clone = item.clone();
+                        loot.push(item_clone.clone());
+                        // Remover el item seleccionado para evitar duplicados
+                        available_items_copy.retain(|x| x != &item_clone);
+                    }
+                }
+                
+                session.loot_options = Some(loot);
+                session.state = GameState::LootSelection;
+                battle_state.add_log("¡Has recibido objetos de recompensa!".to_string());
             } else {
-                // Volver al mapa
+                // Volver al mapa para encuentros normales
                 session.state = GameState::Map;
             }
             
@@ -370,6 +641,8 @@ pub async fn submit_move(
                 battle_over: true,
                 player_won: Some(true),
                 session: Some(session),
+                turn_executed: true,
+                pending_actions: 0,
             }));
         }
         core::battle::BattleOutcome::PlayerLost => {
@@ -401,6 +674,8 @@ pub async fn submit_move(
                 battle_over: true,
                 player_won: Some(false),
                 session: Some(session),
+                turn_executed: true,
+                pending_actions: 0,
             }));
         }
     }
@@ -440,12 +715,17 @@ pub async fn switch_pokemon(
     State(state): State<AppState>,
     Json(payload): Json<SwitchPokemonRequest>,
 ) -> Result<Json<SwitchPokemonResponse>, StatusCode> {
+    eprintln!("[DEBUG] switch_pokemon: Recibida solicitud - session_id: {}, switch_to_index: {}", 
+        payload.session_id, payload.switch_to_index);
+    
     // Buscar la sesión
     let mut session = state
         .sessions
         .get(&payload.session_id)
         .ok_or(StatusCode::NOT_FOUND)?
         .clone();
+    
+    eprintln!("[DEBUG] switch_pokemon: Sesión encontrada, estado: {:?}", session.state);
 
     // Validar que esté en estado de batalla (normal o gimnasio)
     if session.state != GameState::Battle && session.state != GameState::GymBattle {
@@ -458,35 +738,51 @@ pub async fn switch_pokemon(
         .clone()
         .ok_or(StatusCode::BAD_REQUEST)?;
 
+    // Limpiar acciones pendientes cuando el jugador cambia de Pokémon
+    // (el cambio de Pokémon cancela las acciones del turno)
+    battle_state.pending_player_actions.clear();
+
     // Validar que el índice sea válido
     if payload.switch_to_index >= session.team.active_members.len() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
+    // Obtener el primer índice activo (compatibilidad con Single)
+    let current_player_index = battle_state.player_active_indices.first().copied().ok_or(StatusCode::BAD_REQUEST)?;
+    eprintln!("[DEBUG] switch_pokemon: Índice actual: {}, Índice objetivo: {}", current_player_index, payload.switch_to_index);
+    
     // Validar que no sea el mismo Pokémon que ya está activo
-    if payload.switch_to_index == battle_state.player_active_index {
+    if payload.switch_to_index == current_player_index {
+        eprintln!("[DEBUG] switch_pokemon: ERROR - Intento de cambiar al mismo Pokémon");
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Validar que el Pokémon al que se quiere cambiar no esté debilitado
     let target_pokemon = &session.team.active_members[payload.switch_to_index];
+    eprintln!("[DEBUG] switch_pokemon: Pokémon objetivo: {} (HP: {})", target_pokemon.species.display_name, target_pokemon.current_hp);
     if target_pokemon.current_hp == 0 {
+        eprintln!("[DEBUG] switch_pokemon: ERROR - Pokémon objetivo está debilitado");
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Obtener el Pokémon actual ANTES del cambio para determinar si es forzado
-    let current_active = &session.team.active_members[battle_state.player_active_index];
+    let current_active = &session.team.active_members[current_player_index];
     let is_forced_switch = current_active.current_hp == 0;
+    eprintln!("[DEBUG] switch_pokemon: Cambio forzado: {} (HP actual: {})", is_forced_switch, current_active.current_hp);
 
     // Obtener el nombre del Pokémon actual y del nuevo
     let current_pokemon_name = current_active.species.display_name.clone();
     let new_pokemon_name = target_pokemon.species.display_name.clone();
 
-    // Cambiar el Pokémon activo
-    battle_state.player_active_index = payload.switch_to_index;
+    // Cambiar el Pokémon activo (actualizar el primer slot en Single)
+    if let Some(first) = battle_state.player_active_indices.first_mut() {
+        *first = payload.switch_to_index;
+    } else {
+        battle_state.player_active_indices.push(payload.switch_to_index);
+    }
 
     // Obtener el nuevo Pokémon activo (mutable)
-    let new_active_index = battle_state.player_active_index;
+    let new_active_index = payload.switch_to_index;
     let mut new_active_pokemon = session.team.active_members[new_active_index].clone();
     let mut enemy_mon = battle_state.get_opponent_active().clone();
 
@@ -517,18 +813,52 @@ pub async fn switch_pokemon(
     } else {
         // Cambio táctico: El enemigo SÍ ataca (el jugador gasta su turno cambiando)
         // Seleccionar un movimiento aleatorio del enemigo
-        let enemy_active_moves = enemy_mon.get_active_moves();
-        if enemy_active_moves.is_empty() {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-
         let mut rng = StdRng::from_entropy();
-        let enemy_move_index = rng.gen_range(0..enemy_active_moves.len());
-        let enemy_move_id = &enemy_active_moves[enemy_move_index].template_id;
-        let enemy_move = state
-            .moves
-            .get(enemy_move_id)
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        
+        // Inicializar PP de todos los movimientos del enemigo
+        let enemy_learned_moves = enemy_mon.get_active_learned_moves();
+        let enemy_move_ids: Vec<String> = enemy_learned_moves
+            .iter()
+            .map(|m| m.move_id.clone())
+            .collect();
+        
+        for move_id in &enemy_move_ids {
+            if let Some(move_data) = state.moves.get(move_id) {
+                initialize_move_pp(&mut enemy_mon, move_id, move_data);
+            }
+        }
+        
+        // Verificar si el enemigo tiene movimientos con PP disponible
+        let enemy_has_pp = has_moves_with_pp(&enemy_mon);
+        
+        // Determinar el movimiento del enemigo
+        let (enemy_move, enemy_move_template_id) = if !enemy_has_pp {
+            // Sin PP disponible: usar Struggle
+            (create_struggle_move(), "struggle".to_string())
+        } else {
+            // Filtrar movimientos con PP disponible
+            let enemy_learned_moves_after = enemy_mon.get_active_learned_moves();
+            let moves_with_pp: Vec<String> = enemy_learned_moves_after
+                .iter()
+                .filter(|m| m.current_pp > 0)
+                .map(|m| m.move_id.clone())
+                .collect();
+            
+            if moves_with_pp.is_empty() {
+                // No hay movimientos con PP, usar Struggle
+                (create_struggle_move(), "struggle".to_string())
+            } else {
+                // Seleccionar un movimiento aleatorio de los que tienen PP
+                let move_id = moves_with_pp.choose(&mut rng)
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                let move_data = state
+                    .moves
+                    .get(move_id)
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+                    .clone();
+                (move_data, move_id.clone())
+            }
+        };
 
         // Inicializar battle_stages si no están inicializados
         if new_active_pokemon.battle_stages.is_none() {
@@ -538,12 +868,33 @@ pub async fn switch_pokemon(
             enemy_mon.init_battle_stages();
         }
 
+        // Hook: Activar habilidades de entrada del nuevo Pokémon
+        let mut entry_logs = Vec::new();
+        let (weather_to_set, terrain_to_set) = trigger_on_entry_abilities(&new_active_pokemon, &mut enemy_mon, &mut entry_logs);
+        // Establecer el weather si la habilidad lo activó
+        if let Some(weather) = weather_to_set {
+            battle_state.weather = Some(weather);
+        }
+        // Establecer el terrain si la habilidad lo activó
+        if let Some(terrain) = terrain_to_set {
+            battle_state.terrain = Some(terrain);
+        }
+        // Añadir logs de habilidades de entrada al battle_state
+        for log in &entry_logs {
+            battle_state.add_log(log.clone());
+        }
+
         // Ejecutar el ataque del enemigo
+        let weather_ref = battle_state.weather.as_ref();
+        let terrain_ref = battle_state.terrain.as_ref();
         execute_enemy_attack(
             &mut new_active_pokemon,
             &mut enemy_mon,
-            enemy_move,
+            &enemy_move,
+            &enemy_move_template_id,
             &mut rng,
+            weather_ref,
+            terrain_ref,
         )
     };
 
@@ -553,7 +904,10 @@ pub async fn switch_pokemon(
     // Actualizar el oponente en el battle_state (solo si hubo ataque)
     if !is_forced_switch {
         if battle_state.is_trainer_battle {
-            battle_state.opponent_team[battle_state.opponent_active_index] = enemy_mon.clone();
+            // Actualizar el primer slot del oponente (en Single solo hay uno)
+            if let Some(first) = battle_state.opponent_active_indices.first() {
+                battle_state.opponent_team[*first] = enemy_mon.clone();
+            }
         } else {
             battle_state.opponent_instance = enemy_mon.clone();
         }

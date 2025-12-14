@@ -78,7 +78,12 @@ pub async fn reorder_team(
     if let Some(ref mut battle_state) = session.battle {
         // Buscar el nuevo índice del Pokémon que estaba activo
         // Por simplicidad, asumimos que el primer Pokémon en el nuevo orden es el activo
-        battle_state.player_active_index = 0;
+        // Actualizar el primer slot (en Single solo hay uno)
+        if let Some(first) = battle_state.player_active_indices.first_mut() {
+            *first = 0;
+        } else {
+            battle_state.player_active_indices.push(0);
+        }
     }
 
     // Guardar la sesión actualizada

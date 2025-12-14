@@ -5,7 +5,10 @@
   "type": "module",
   "main": "seed_pokedex.ts",
   "scripts": {
-    "seed": "tsx seed_pokedex.ts"
+    "seed": "tsx seed_all.ts",
+    "seed:pokedex": "tsx seed_pokedex.ts",
+    "seed:moves": "tsx seed_moves.ts",
+    "seed:items": "tsx seed_items.ts"
   },
   "dependencies": {
     "axios": "^1.6.0"

@@ -1,0 +1,680 @@
+use rand::rngs::StdRng;
+use rand::Rng;
+use crate::models::{MoveData, PokemonInstance, WeatherState, TerrainState, PokemonType, StatusCondition, TerrainType};
+use super::checks::{can_pokemon_move, check_ailment_success};
+use super::mechanics::{calculate_damage, check_critical_hit, calculate_hit_count};
+use super::effects::is_grounded;
+
+/// Contexto de batalla para procesar un ataque individual
+/// Implementa el patrón Pipeline para organizar la lógica de batalla
+pub struct BattleContext<'a> {
+    pub attacker: &'a mut PokemonInstance,
+    pub defender: &'a mut PokemonInstance,
+    pub move_data: &'a MoveData,
+    pub attacker_name: String,
+    pub defender_name: String,
+    pub rng: &'a mut StdRng,
+    pub logs: Vec<String>,
+    pub weather: Option<&'a WeatherState>,
+    pub terrain: Option<&'a TerrainState>,
+}
+
+impl<'a> BattleContext<'a> {
+    /// Crea un nuevo contexto de batalla
+    pub fn new(
+        attacker: &'a mut PokemonInstance,
+        defender: &'a mut PokemonInstance,
+        move_data: &'a MoveData,
+        attacker_name: String,
+        defender_name: String,
+        rng: &'a mut StdRng,
+        weather: Option<&'a WeatherState>,
+        terrain: Option<&'a TerrainState>,
+    ) -> Self {
+        Self {
+            attacker,
+            defender,
+            move_data,
+            attacker_name,
+            defender_name,
+            rng,
+            logs: Vec::new(),
+            weather,
+            terrain,
+        }
+    }
+
+    /// Paso 1: Chequeo de Estado (Dormido, Congelado, Flinch, Paralysis, Recarga, Carga)
+    /// Retorna true si el atacante puede ejecutar el movimiento
+    pub fn can_execute_move(&mut self) -> bool {
+        eprintln!("[DEBUG] BattleContext::can_execute_move: Verificando si {} puede ejecutar {}", self.attacker_name, self.move_data.name);
+        // Check de Flinch
+        if let Some(ref mut volatile) = self.attacker.volatile_status {
+            if volatile.flinched {
+                self.logs.push(format!(
+                    "¡{} retrocedió y no pudo atacar!",
+                    self.attacker_name
+                ));
+                volatile.flinched = false; // Resetear flinch
+                return false; // Terminar turno de este Pokémon
+            }
+            
+            // Check de Recarga (Hyper Beam)
+            if volatile.must_recharge {
+                self.logs.push(format!(
+                    "¡{} debe recargar energía!",
+                    self.attacker_name
+                ));
+                volatile.must_recharge = false; // Resetear recarga
+                return false; // Terminar turno de este Pokémon
+            }
+            
+            // Check de Carga (Solar Beam, etc.)
+            if let Some(ref charging_move_id) = volatile.charging_move {
+                // Ejecutar el movimiento cargado inmediatamente
+                // El movimiento ya está en self.move_data (debe ser el mismo que charging_move_id)
+                if self.move_data.id == *charging_move_id {
+                    self.logs.push(format!(
+                        "¡{} lanzó {}!",
+                        self.attacker_name,
+                        self.move_data.name
+                    ));
+                    // Resetear charging_move después de ejecutar
+                    volatile.charging_move = None;
+                    return true; // Continuar con el ataque
+                } else {
+                    // Está cargando otro movimiento, no puede usar este
+                    self.logs.push(format!(
+                        "¡{} está cargando energía!",
+                        self.attacker_name
+                    ));
+                    return false; // No puede ejecutar otro movimiento
+                }
+            }
+        }
+
+        // Check de estados alterados (Sleep, Freeze, Paralysis)
+        let (can_move, status_logs) = can_pokemon_move(self.attacker, self.rng);
+        self.logs.extend(status_logs);
+
+        if !can_move {
+            return false;
+        }
+
+        // Check de Psychic Terrain: Bloquea ataques de prioridad > 0 si el defensor está grounded
+        if let Some(terrain_state) = self.terrain {
+            if terrain_state.terrain_type == TerrainType::Psychic {
+                if self.move_data.priority > 0 && is_grounded(self.defender) {
+                    self.logs.push(format!(
+                        "¡El Campo Psíquico protege a {} de ataques rápidos!",
+                        self.defender_name
+                    ));
+                    return false;
+                }
+            }
+        }
+
+        // Puede moverse: añadir log del movimiento
+        eprintln!("[DEBUG] BattleContext::can_execute_move: {} puede ejecutar {}", self.attacker_name, self.move_data.name);
+        self.logs.push(format!("{} usó {}", self.attacker_name, self.move_data.name));
+        true
+    }
+
+    /// Paso 2: Cálculo de Daño (Críticos, Multi-hit, Multipliers)
+    /// Retorna el daño total infligido (0 si falló)
+    pub fn calculate_damage(&mut self) -> u16 {
+        eprintln!("[DEBUG] BattleContext::calculate_damage: Calculando daño de {} contra {}", self.attacker_name, self.defender_name);
+        eprintln!("[DEBUG] BattleContext::calculate_damage: Movimiento: {} (poder: {:?}, tipo: {})", 
+            self.move_data.name, self.move_data.power, self.move_data.r#type);
+        // Check de Protección (Protect/Detect)
+        if let Some(ref volatile) = self.defender.volatile_status {
+            if volatile.protected {
+                self.logs.push(format!(
+                    "¡{} se protegió!",
+                    self.defender_name
+                ));
+                return 0; // No hace daño y evita efectos secundarios
+            }
+        }
+        
+        // Cálculo de número de golpes (Multi-Hit)
+        let hit_count = calculate_hit_count(
+            self.move_data.meta.min_hits,
+            self.move_data.meta.max_hits,
+            self.rng,
+        );
+
+        let mut total_damage = 0u16;
+        let mut hit_successfully = false;
+        let mut first_effectiveness_msg = String::new();
+
+        // Bucle de golpes
+        for hit_num in 0..hit_count {
+            // Check de precisión para cada golpe
+            let move_hits = if let Some(accuracy) = self.move_data.accuracy {
+                let roll = self.rng.gen_range(0..=100);
+                roll <= accuracy as u32
+            } else {
+                true
+            };
+
+            if !move_hits {
+                if hit_count == 1 {
+                    self.logs.push("¡Pero falló!".to_string());
+                } else {
+                    self.logs.push(format!("¡Falló el golpe {}!", hit_num + 1));
+                }
+                break; // Si falla, no continúa con más golpes
+            }
+
+            // Check crítico
+            let is_critical = check_critical_hit(self.move_data.meta.crit_rate, self.rng);
+            if is_critical && hit_num == 0 {
+                // Solo mostrar mensaje de crítico en el primer golpe
+                self.logs.push("¡Golpe crítico!".to_string());
+            }
+
+            // Calcular daño (pasar logs del contexto, weather y terrain)
+            let (damage, effectiveness_msg, _) = calculate_damage(
+                self.attacker,
+                self.defender,
+                self.move_data,
+                is_critical,
+                self.rng,
+                Some(&mut self.logs),
+                self.weather,
+                self.terrain,
+            );
+
+            // Mostrar mensaje de efectividad solo en el primer golpe
+            if hit_num == 0 && !effectiveness_msg.is_empty() {
+                first_effectiveness_msg = effectiveness_msg;
+            }
+
+            total_damage += damage;
+            hit_successfully = true;
+
+            // Si el defensor se debilita, terminar el bucle
+            if damage >= self.defender.current_hp {
+                self.defender.current_hp = 0;
+                break;
+            }
+        }
+
+        // Si no golpeó ni una vez, retornar 0
+        if !hit_successfully {
+            return 0;
+        }
+
+        // Mostrar mensaje de efectividad
+        if !first_effectiveness_msg.is_empty() {
+            self.logs.push(first_effectiveness_msg);
+        }
+
+        // Mostrar mensaje de daño (acumulado para multi-hit)
+        if hit_count > 1 {
+            self.logs.push(format!(
+                "¡Golpeó {} veces! {} recibió {} de daño total",
+                hit_count, self.defender_name, total_damage
+            ));
+        } else {
+            self.logs.push(format!(
+                "{} recibió {} de daño",
+                self.defender_name, total_damage
+            ));
+        }
+
+        total_damage
+    }
+
+    /// Paso 3: Aplicar Efectos (Status, Stats, Recoil, Drain, Healing)
+    /// Aplica todos los efectos secundarios del movimiento
+    pub fn apply_move_effects(&mut self, damage_dealt: u16) {
+        // Si el defensor está protegido, no aplicar efectos secundarios
+        if let Some(ref volatile) = self.defender.volatile_status {
+            if volatile.protected {
+                // Ya se mostró el mensaje de protección en calculate_damage
+                // No aplicar efectos secundarios
+                return;
+            }
+        }
+        
+        // Aplicar cambios de stats
+        if !self.move_data.stat_changes.is_empty() {
+            let stat_chance = if self.move_data.meta.stat_chance == 0 {
+                100
+            } else {
+                self.move_data.meta.stat_chance
+            };
+
+            let roll = self.rng.gen_range(0..=100);
+            if roll <= stat_chance as u32 {
+                let attacker_name = self.attacker.species.display_name.clone();
+                let defender_name = self.defender.species.display_name.clone();
+                
+                for stat_change in &self.move_data.stat_changes {
+                    let apply_to_user = self.move_data.target == "user";
+                    
+                    if apply_to_user {
+                        if self.attacker.battle_stages.is_none() {
+                            self.attacker.init_battle_stages();
+                        }
+                        if let Some(ref mut stages) = self.attacker.battle_stages {
+                            let old_stage = match stat_change.stat.as_str() {
+                                "attack" => stages.attack,
+                                "defense" => stages.defense,
+                                "special_attack" => stages.special_attack,
+                                "special_defense" => stages.special_defense,
+                                "speed" => stages.speed,
+                                "accuracy" => stages.accuracy,
+                                "evasion" => stages.evasion,
+                                _ => continue,
+                            };
+                            stages.apply_change(&stat_change.stat, stat_change.change);
+                            let new_stage = match stat_change.stat.as_str() {
+                                "attack" => stages.attack,
+                                "defense" => stages.defense,
+                                "special_attack" => stages.special_attack,
+                                "special_defense" => stages.special_defense,
+                                "speed" => stages.speed,
+                                "accuracy" => stages.accuracy,
+                                "evasion" => stages.evasion,
+                                _ => continue,
+                            };
+                            let stat_name = match stat_change.stat.as_str() {
+                                "attack" => "ataque",
+                                "defense" => "defensa",
+                                "special_attack" => "ataque especial",
+                                "special_defense" => "defensa especial",
+                                "speed" => "velocidad",
+                                "accuracy" => "precisión",
+                                "evasion" => "evasión",
+                                _ => continue,
+                            };
+                            if new_stage > old_stage {
+                                self.logs.push(format!("¡El {} de {} subió!", stat_name, attacker_name));
+                            } else if new_stage < old_stage {
+                                self.logs.push(format!("¡El {} de {} bajó!", stat_name, attacker_name));
+                            }
+                        }
+                    } else {
+                        if self.defender.battle_stages.is_none() {
+                            self.defender.init_battle_stages();
+                        }
+                        if let Some(ref mut stages) = self.defender.battle_stages {
+                            let old_stage = match stat_change.stat.as_str() {
+                                "attack" => stages.attack,
+                                "defense" => stages.defense,
+                                "special_attack" => stages.special_attack,
+                                "special_defense" => stages.special_defense,
+                                "speed" => stages.speed,
+                                "accuracy" => stages.accuracy,
+                                "evasion" => stages.evasion,
+                                _ => continue,
+                            };
+                            stages.apply_change(&stat_change.stat, stat_change.change);
+                            let new_stage = match stat_change.stat.as_str() {
+                                "attack" => stages.attack,
+                                "defense" => stages.defense,
+                                "special_attack" => stages.special_attack,
+                                "special_defense" => stages.special_defense,
+                                "speed" => stages.speed,
+                                "accuracy" => stages.accuracy,
+                                "evasion" => stages.evasion,
+                                _ => continue,
+                            };
+                            let stat_name = match stat_change.stat.as_str() {
+                                "attack" => "ataque",
+                                "defense" => "defensa",
+                                "special_attack" => "ataque especial",
+                                "special_defense" => "defensa especial",
+                                "speed" => "velocidad",
+                                "accuracy" => "precisión",
+                                "evasion" => "evasión",
+                                _ => continue,
+                            };
+                            if new_stage > old_stage {
+                                self.logs.push(format!("¡El {} de {} subió!", stat_name, defender_name));
+                            } else if new_stage < old_stage {
+                                self.logs.push(format!("¡El {} de {} bajó!", stat_name, defender_name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Aplicar estados alterados (ailments)
+        if self.move_data.meta.ailment != "none" {
+            // Verificar efectos de terreno antes de aplicar estados
+            let terrain_blocks_ailment = if let Some(terrain_state) = self.terrain {
+                match terrain_state.terrain_type {
+                    TerrainType::Electric => {
+                        // Electric Terrain: Bloquea Sleep si el defensor está grounded
+                        if is_grounded(self.defender) && self.move_data.meta.ailment.as_str() == "sleep" {
+                            self.logs.push(format!(
+                                "¡El Campo Eléctrico evita el sueño!",
+                            ));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    TerrainType::Misty => {
+                        // Misty Terrain: Bloquea CUALQUIER estado si el defensor está grounded
+                        if is_grounded(self.defender) {
+                            self.logs.push(format!(
+                                "¡El Campo de Niebla protege a {}!",
+                                self.defender_name
+                            ));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+
+            if terrain_blocks_ailment {
+                // El terreno bloqueó el estado, no continuar
+                return;
+            }
+
+            let move_has_power = self.move_data.power.is_some();
+            let ailment_success = check_ailment_success(
+                self.move_data.meta.ailment_chance,
+                move_has_power,
+                self.rng,
+            );
+
+            if ailment_success && self.defender.status_condition.is_none() {
+                // Verificar inmunidades por tipo
+                let is_immune = match self.move_data.meta.ailment.as_str() {
+                    "burn" => {
+                        self.defender.randomized_profile.rolled_primary_type == PokemonType::Fire
+                            || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Fire)
+                    }
+                    "paralysis" => {
+                        self.defender.randomized_profile.rolled_primary_type == PokemonType::Electric
+                            || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Electric)
+                    }
+                    "poison" | "tox" => {
+                        self.defender.randomized_profile.rolled_primary_type == PokemonType::Poison
+                            || self.defender.randomized_profile.rolled_primary_type == PokemonType::Steel
+                            || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Poison)
+                            || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Steel)
+                    }
+                    _ => false,
+                };
+
+                if !is_immune {
+                    let status = match self.move_data.meta.ailment.as_str() {
+                        "burn" => Some(StatusCondition::Burn),
+                        "paralysis" => Some(StatusCondition::Paralysis),
+                        "poison" => Some(StatusCondition::Poison),
+                        "bad-poison" | "tox" => Some(StatusCondition::BadPoison),
+                        "sleep" => Some(StatusCondition::Sleep),
+                        "freeze" => Some(StatusCondition::Freeze),
+                        _ => None,
+                    };
+
+                    if let Some(status_condition) = status {
+                        self.defender.status_condition = Some(status_condition);
+                        let status_msg = match status_condition {
+                            StatusCondition::Burn => "quemó",
+                            StatusCondition::Paralysis => "paralizó",
+                            StatusCondition::Poison => "envenenó",
+                            StatusCondition::BadPoison => "envenenó gravemente",
+                            StatusCondition::Sleep => "durmió",
+                            StatusCondition::Freeze => "congeló",
+                        };
+                        self.logs.push(format!(
+                            "¡{} se ha {}!",
+                            self.defender.species.display_name,
+                            status_msg
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Aplicar Flinch
+        if self.move_data.meta.flinch_chance > 0 {
+            let roll = self.rng.gen_range(0..=100);
+            if roll <= self.move_data.meta.flinch_chance as u32 {
+                if self.defender.volatile_status.is_none() {
+                    self.defender.init_battle_stages();
+                }
+                if let Some(ref mut volatile) = self.defender.volatile_status {
+                    volatile.flinched = true;
+                    self.logs.push(format!(
+                        "¡{} retrocedió!",
+                        self.defender.species.display_name
+                    ));
+                }
+            }
+        }
+
+        // Aplicar Drain / Recoil (basado en daño total)
+        // Manejo especial para Struggle: daño de retroceso = 1/4 del HP máximo
+        if self.move_data.id == "struggle" {
+            // Struggle siempre causa daño de retroceso de 1/4 del HP máximo
+            let max_hp = self.attacker.base_computed_stats.hp;
+            let recoil_damage = max_hp / 4;
+            
+            if recoil_damage >= self.attacker.current_hp {
+                self.attacker.current_hp = 0;
+                self.logs.push(format!(
+                    "¡{} se debilitó por el daño de retroceso!",
+                    self.attacker_name
+                ));
+            } else {
+                self.attacker.current_hp -= recoil_damage;
+                self.logs.push(format!(
+                    "¡{} recibió {} de daño de retroceso!",
+                    self.attacker_name,
+                    recoil_damage
+                ));
+            }
+        } else if self.move_data.meta.drain != 0 && damage_dealt > 0 {
+            let drain_percent = self.move_data.meta.drain as f32 / 100.0;
+            let drain_amount = (damage_dealt as f32 * drain_percent.abs()) as u16;
+            
+            if self.move_data.meta.drain > 0 {
+                // Drain: cura al atacante
+                let max_hp = self.attacker.base_computed_stats.hp;
+                let new_hp = (self.attacker.current_hp as u32 + drain_amount as u32).min(max_hp as u32) as u16;
+                let healed = new_hp - self.attacker.current_hp;
+                self.attacker.current_hp = new_hp;
+                if healed > 0 {
+                    self.logs.push(format!(
+                        "¡{} recuperó {} PS!",
+                        self.attacker_name,
+                        healed
+                    ));
+                }
+            } else {
+                // Recoil: daña al atacante
+                if drain_amount >= self.attacker.current_hp {
+                    self.attacker.current_hp = 0;
+                    self.logs.push(format!(
+                        "¡{} se debilitó por el daño de retroceso!",
+                        self.attacker_name
+                    ));
+                } else {
+                    self.attacker.current_hp -= drain_amount;
+                    self.logs.push(format!(
+                        "¡{} recibió {} de daño de retroceso!",
+                        self.attacker_name,
+                        drain_amount
+                    ));
+                }
+            }
+        }
+
+        // Aplicar Healing
+        if self.move_data.meta.healing > 0 {
+            let heal_percent = self.move_data.meta.healing as f32 / 100.0;
+            let max_hp = self.attacker.base_computed_stats.hp;
+            let heal_amount = (max_hp as f32 * heal_percent) as u16;
+            let new_hp = (self.attacker.current_hp as u32 + heal_amount as u32).min(max_hp as u32) as u16;
+            let healed = new_hp - self.attacker.current_hp;
+            self.attacker.current_hp = new_hp;
+            if healed > 0 {
+                self.logs.push(format!(
+                    "¡{} recuperó {} PS!",
+                    self.attacker.species.display_name,
+                    healed
+                ));
+            }
+        }
+        
+        // Aplicar efectos especiales de movimientos (Protección, Recarga, Carga, Clima)
+        // Clima: Detectar movimientos que cambian el clima (se establecerá en execute_turn)
+        if self.move_data.id == "sunny-day" {
+            self.logs.push("¡El sol se intensificó!".to_string());
+        } else if self.move_data.id == "rain-dance" {
+            self.logs.push("¡Comenzó a llover!".to_string());
+        } else if self.move_data.id == "sandstorm" {
+            self.logs.push("¡Se desató una tormenta de arena!".to_string());
+        } else if self.move_data.id == "hail" {
+            self.logs.push("¡Comenzó a granizar!".to_string());
+        }
+        
+        if let Some(ref mut volatile) = self.attacker.volatile_status {
+            // Protección (Protect/Detect)
+            if self.move_data.id == "protect" || self.move_data.id == "detect" {
+                // Calcular probabilidad de éxito: success = 1.0 / (2 ^ protect_counter)
+                let success_rate = 1.0 / (2.0_f32.powi(volatile.protect_counter as i32));
+                let roll = self.rng.gen::<f32>();
+                
+                if roll < success_rate {
+                    // Protección exitosa
+                    volatile.protected = true;
+                    volatile.protect_counter += 1;
+                    self.logs.push(format!(
+                        "¡{} se protegió!",
+                        self.attacker_name
+                    ));
+                } else {
+                    // Protección falló
+                    volatile.protected = false;
+                    volatile.protect_counter = 0;
+                    self.logs.push(format!(
+                        "¡Pero falló!",
+                    ));
+                }
+            }
+            
+            // Recarga (Hyper Beam y similares)
+            // Hyper Beam requiere recarga después de usarse
+            if self.move_data.id == "hyper-beam" || self.move_data.id == "giga-impact" || 
+               self.move_data.id == "blast-burn" || self.move_data.id == "hydro-cannon" ||
+               self.move_data.id == "frenzy-plant" || self.move_data.id == "rock-wrecker" ||
+               self.move_data.id == "roar-of-time" || self.move_data.id == "prismatic-laser" {
+                volatile.must_recharge = true;
+            }
+            
+            // Carga (Solar Beam y similares)
+            // Si el movimiento tiene min_turns y max_turns, requiere carga
+            if let (Some(min_turns), Some(max_turns)) = (self.move_data.meta.min_turns, self.move_data.meta.max_turns) {
+                if min_turns > 1 || max_turns > 1 {
+                    // Movimiento de carga
+                    if volatile.charging_move.is_none() {
+                        // Primera fase: cargar
+                        volatile.charging_move = Some(self.move_data.id.clone());
+                        self.logs.push(format!(
+                            "¡{} está cargando energía!",
+                            self.attacker_name
+                        ));
+                    } else {
+                        // Segunda fase: ya estaba cargando, ahora se ejecuta
+                        volatile.charging_move = None;
+                    }
+                }
+            }
+            
+            // Si el movimiento se ejecutó completamente (no es carga), resetear charging_move
+            if volatile.charging_move.is_some() && 
+               !(self.move_data.meta.min_turns.is_some() && self.move_data.meta.max_turns.is_some()) {
+                // No es un movimiento de carga, resetear
+                volatile.charging_move = None;
+            }
+        }
+    }
+    
+    /// Aplica efectos de clima al final del turno
+    /// Retorna (daño total, logs)
+    pub fn apply_weather_effects(&mut self, weather: &mut Option<WeatherState>) -> (u16, Vec<String>) {
+        let mut logs = Vec::new();
+        let mut total_damage = 0u16;
+        
+        let Some(ref mut weather_state) = weather else {
+            return (0, logs);
+        };
+        
+        // Decrementar turnos restantes
+        if weather_state.turns_remaining > 0 {
+            weather_state.turns_remaining -= 1;
+        }
+        
+        // Si el clima expiró, resetearlo
+        if weather_state.turns_remaining == 0 {
+            logs.push("¡El clima volvió a la normalidad!".to_string());
+            *weather = None;
+            return (0, logs);
+        }
+        
+        // Aplicar daño residual según el tipo de clima
+        use crate::models::WeatherType;
+        match weather_state.weather_type {
+            WeatherType::Sandstorm => {
+                // Daña 1/16 HP a todos EXCEPTO tipos Rock, Ground, Steel
+                let is_immune = self.defender.randomized_profile.rolled_primary_type == PokemonType::Rock
+                    || self.defender.randomized_profile.rolled_primary_type == PokemonType::Ground
+                    || self.defender.randomized_profile.rolled_primary_type == PokemonType::Steel
+                    || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Rock)
+                    || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Ground)
+                    || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Steel);
+                
+                if !is_immune {
+                    let max_hp = self.defender.base_computed_stats.hp;
+                    let damage = max_hp / 16;
+                    let actual_damage = damage.min(self.defender.current_hp);
+                    self.defender.current_hp = self.defender.current_hp.saturating_sub(damage);
+                    total_damage = actual_damage;
+                    logs.push(format!(
+                        "¡La tormenta de arena golpea a {}!",
+                        self.defender_name
+                    ));
+                }
+            }
+            WeatherType::Hail => {
+                // Daña 1/16 HP a todos EXCEPTO tipos Ice
+                let is_immune = self.defender.randomized_profile.rolled_primary_type == PokemonType::Ice
+                    || self.defender.randomized_profile.rolled_secondary_type == Some(PokemonType::Ice);
+                
+                if !is_immune {
+                    let max_hp = self.defender.base_computed_stats.hp;
+                    let damage = max_hp / 16;
+                    let actual_damage = damage.min(self.defender.current_hp);
+                    self.defender.current_hp = self.defender.current_hp.saturating_sub(damage);
+                    total_damage = actual_damage;
+                    logs.push(format!(
+                        "¡El granizo golpea a {}!",
+                        self.defender_name
+                    ));
+                }
+            }
+            _ => {
+                // Sun y Rain no causan daño residual
+            }
+        }
+        
+        (total_damage, logs)
+    }
+}
+

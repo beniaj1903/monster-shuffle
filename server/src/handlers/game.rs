@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+use core::models::BattleFormat;
+
 /// Payload para crear una nueva sesión de juego
 #[derive(Deserialize, Debug)]
 pub struct NewGamePayload {
@@ -23,6 +25,10 @@ pub struct NewGamePayload {
     /// Modo Chaos Move Randomizer (default: false)
     #[serde(default)]
     pub chaos_move_randomizer: Option<bool>,
+    /// Formato de batalla preferido para batallas de gimnasio (default: Single)
+    /// Nota: Los encuentros salvajes siempre son Single, independientemente de este valor
+    #[serde(default)]
+    pub preferred_format: Option<BattleFormat>,
 }
 
 fn default_gym_interval() -> Option<u32> {
@@ -94,7 +100,7 @@ pub async fn start_new_game(
         let seed = rng.gen::<u64>();
         
         // Crear la instancia con nivel 5
-        let instance = create_pokemon_instance(&species, 5, seed, chaos_mode, &global_move_pool);
+        let instance = create_pokemon_instance(&species, 5, seed, chaos_mode, &global_move_pool, Some(&state.moves));
         starters.push(instance);
     }
 
@@ -103,6 +109,7 @@ pub async fn start_new_game(
         gym_interval: payload.gym_interval.unwrap_or(5),
         total_encounters: payload.total_encounters.unwrap_or(20),
         chaos_move_randomizer: payload.chaos_move_randomizer.unwrap_or(false),
+        preferred_format: payload.preferred_format.unwrap_or(BattleFormat::Single),
     };
 
     // Crear la sesión de juego
@@ -267,23 +274,49 @@ pub async fn explore(
             let opponent_level = (avg_level + level_bonus).min(100);
             
             let seed = rng.gen::<u64>() + i as u64;
-            let instance = create_pokemon_instance(species, opponent_level, seed, chaos_mode, &global_move_pool);
+            let instance = create_pokemon_instance(species, opponent_level, seed, chaos_mode, &global_move_pool, Some(&state.moves));
             opponent_team.push(instance);
         }
 
-        // Inicializar battle_stages para los oponentes al entrar en batalla
+        // Asignar items aleatorios a los Gym Leaders (50% de probabilidad por Pokémon)
+        // Lista de items competitivos disponibles
+        let available_items = vec![
+            "leftovers",
+            "life-orb",
+            "choice-band",
+            "choice-specs",
+            "choice-scarf",
+            "sitrus-berry",
+            "rocky-helmet",
+            "focus-sash",
+        ];
+        
         for opponent in &mut opponent_team {
+            // 50% de probabilidad de tener un item
+            if rng.gen_bool(0.5) {
+                if let Some(item_id) = available_items.choose(&mut rng) {
+                    opponent.held_item = Some(item_id.to_string());
+                }
+            }
+            
+            // Inicializar battle_stages para los oponentes al entrar en batalla
             if opponent.battle_stages.is_none() {
                 opponent.init_battle_stages();
             }
         }
 
         // Crear el estado de batalla contra el líder
+        // Usar el formato preferido de la configuración de la sesión
+        let preferred_format = session.config.preferred_format;
+        eprintln!("[DEBUG] explore: Creando batalla de gimnasio con formato: {:?}", preferred_format);
         let battle_state = BattleState::new_trainer_battle(
             0, // El jugador usa su primer Pokémon
             opponent_team,
             leader_name.clone(),
+            preferred_format,
         );
+        eprintln!("[DEBUG] explore: BattleState creado - format: {:?}, player_active_indices: {:?}, opponent_active_indices: {:?}", 
+            battle_state.format, battle_state.player_active_indices, battle_state.opponent_active_indices);
 
         // Inicializar battle_stages para los Pokémon del jugador al entrar en batalla
         if let Some(player_pokemon) = session.team.active_members.get_mut(0) {
@@ -374,7 +407,7 @@ pub async fn explore(
             let seed = rng.gen::<u64>();
             
             // Crear la instancia con el nivel calculado
-            let instance = create_pokemon_instance(&species, wild_level, seed, chaos_mode, &global_move_pool);
+            let instance = create_pokemon_instance(&species, wild_level, seed, chaos_mode, &global_move_pool, Some(&state.moves));
             encounters.push(instance);
         }
         
@@ -450,10 +483,18 @@ pub async fn select_encounter(
     }
 
     // Crear el estado de batalla contra el Pokémon salvaje
+    // IMPORTANTE: Los encuentros salvajes SIEMPRE son Single, independientemente de la configuración
     let mut battle_state = BattleState::new(
         0, // El jugador usa su primer Pokémon (índice 0)
         selected_pokemon.clone(),
     );
+    // Forzar explícitamente Single para encuentros salvajes
+    eprintln!("[DEBUG] select_encounter: Forzando formato Single para encuentro salvaje (preferred_format era: {:?})", session.config.preferred_format);
+    battle_state.format = BattleFormat::Single;
+    battle_state.player_active_indices = vec![0];
+    battle_state.opponent_active_indices = vec![0];
+    eprintln!("[DEBUG] select_encounter: BattleState creado - format: {:?}, player_active_indices: {:?}, opponent_active_indices: {:?}", 
+        battle_state.format, battle_state.player_active_indices, battle_state.opponent_active_indices);
 
     // Inicializar battle_stages para los Pokémon del jugador al entrar en batalla
     if let Some(player_pokemon) = session.team.active_members.get_mut(0) {
@@ -511,5 +552,67 @@ pub async fn get_game_state(
     let session_clone = session.clone();
 
     Ok(Json(session_clone))
+}
+
+/// Payload para seleccionar un objeto de recompensa
+#[derive(Deserialize, Debug)]
+pub struct SelectLootRequest {
+    pub session_id: String,
+    /// Índice del objeto seleccionado (0-2)
+    pub item_index: usize,
+    /// Índice del Pokémon del equipo que recibirá el objeto
+    pub target_pokemon_index: usize,
+}
+
+/// Handler para seleccionar un objeto de recompensa tras vencer a un Gym Leader
+/// 
+/// POST /api/game/select-loot
+/// 
+/// Asigna el objeto seleccionado al Pokémon indicado y vuelve al mapa.
+pub async fn select_loot(
+    State(state): State<AppState>,
+    Json(payload): Json<SelectLootRequest>,
+) -> Result<Json<GameSession>, StatusCode> {
+    let mut session = state
+        .sessions
+        .get(&payload.session_id)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .clone();
+
+    // Validar que el estado sea LootSelection
+    if session.state != GameState::LootSelection {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validar que existan opciones de loot
+    let loot_options = session.loot_options.as_ref()
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    // Validar el índice del objeto
+    if payload.item_index >= loot_options.len() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Validar el índice del Pokémon
+    if payload.target_pokemon_index >= session.team.active_members.len() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Obtener el objeto seleccionado
+    let selected_item = loot_options[payload.item_index].clone();
+
+    // Asignar el objeto al Pokémon
+    session.team.active_members[payload.target_pokemon_index].held_item = Some(selected_item);
+
+    // Limpiar las opciones de loot
+    session.loot_options = None;
+
+    // Volver al mapa
+    session.state = GameState::Map;
+
+    // Guardar la sesión actualizada
+    state.sessions.insert(payload.session_id.clone(), session.clone());
+
+    Ok(Json(session))
 }
 

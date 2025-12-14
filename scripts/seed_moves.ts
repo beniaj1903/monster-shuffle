@@ -22,9 +22,14 @@ interface PokeApiMove {
     };
     ailment_chance: number; // 0-100
     crit_rate: number; // 0-4
-    drain: number; // % de daño que cura al usuario
+    drain: number; // % de daño que cura al usuario (negativo es recoil)
     flinch_chance: number; // % de retroceso
     stat_chance: number; // % de que ocurran los cambios de stats
+    healing: number; // % de curación (0-100)
+    min_hits: number | null; // Número mínimo de golpes (para Double Slap, etc)
+    max_hits: number | null; // Número máximo de golpes
+    min_turns: number | null; // Turnos mínimos (para Solar Beam, Hyper Beam)
+    max_turns: number | null; // Turnos máximos
   };
   stat_changes: Array<{
     stat: {
@@ -51,9 +56,14 @@ interface MoveDataOutput {
     ailment: string;
     ailment_chance: number;
     crit_rate: number;
-    drain: number;
+    drain: number; // Negativo es recoil
     flinch_chance: number;
     stat_chance: number;
+    healing: number; // 0-100
+    min_hits: number | null;
+    max_hits: number | null;
+    min_turns: number | null;
+    max_turns: number | null;
   };
   stat_changes: Array<{
     stat: string;
@@ -123,6 +133,11 @@ async function fetchMoveData(id: number): Promise<MoveDataOutput | null> {
         drain: move.meta.drain,
         flinch_chance: move.meta.flinch_chance,
         stat_chance: move.meta.stat_chance,
+        healing: move.meta.healing ?? 0,
+        min_hits: move.meta.min_hits ?? null,
+        max_hits: move.meta.max_hits ?? null,
+        min_turns: move.meta.min_turns ?? null,
+        max_turns: move.meta.max_turns ?? null,
       },
       stat_changes: stat_changes,
       target: move.target.name,

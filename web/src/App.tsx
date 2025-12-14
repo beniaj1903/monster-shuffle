@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from './api';
-import { GameSession, PokemonInstance } from './types';
+import { GameSession, PokemonInstance, FieldPosition } from './types';
 import { NewGameForm, GameConfig } from './components/NewGameForm';
 import { StarterSelection } from './components/StarterSelection';
 import { MapScreen } from './components/MapScreen';
@@ -118,6 +118,7 @@ function App() {
         gym_interval: config.gym_interval,
         total_encounters: config.total_encounters,
         chaos_move_randomizer: config.chaos_move_randomizer,
+        preferred_format: config.preferred_format,
       });
       setSessionId(response.session_id);
       // El useEffect se encargará de refrescar el estado
@@ -183,14 +184,25 @@ function App() {
   };
 
   // Enviar movimiento en batalla
-  const handleMoveSelect = async (moveIndex: number) => {
+  const handleMoveSelect = async (moveId: string, userIndex: number, targetPosition?: FieldPosition | null) => {
     if (!sessionId || !gameState) return;
 
     setLoading(true);
     setError(null);
 
     try {
-      const response = await api.submitMove(sessionId, moveIndex);
+      const response = await api.submitMove(sessionId, {
+        move_id: moveId,
+        user_index: userIndex,
+        target_position: targetPosition ?? null,
+      });
+      
+      // Si el turno no se ejecutó (faltan más acciones en dobles), mostrar mensaje
+      if (!response.turn_executed && response.pending_actions > 0) {
+        // No refrescar el estado, solo mostrar que se registró la acción
+        // El usuario puede continuar seleccionando movimientos para sus otros Pokémon
+        console.log(`Acción registrada. Faltan ${response.pending_actions} acción(es) más.`);
+      }
       
       // Si la batalla terminó y tenemos la sesión actualizada, usarla directamente
       if (response.battle_over && response.session) {
@@ -200,8 +212,11 @@ function App() {
         if (response.player_won === false) {
           setShowGameOver(true);
         }
+      } else if (response.turn_executed) {
+        // Si el turno se ejecutó, refrescar el estado del juego después del turno
+        await refreshGameState();
       } else {
-        // Si la batalla continúa, refrescar el estado del juego después del turno
+        // Si el turno no se ejecutó, refrescar para ver las acciones pendientes
         await refreshGameState();
       }
     } catch (err) {

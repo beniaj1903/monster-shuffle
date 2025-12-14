@@ -1,10 +1,13 @@
 import { useState } from 'react';
 
+export type BattleFormat = 'Single' | 'Double';
+
 export interface GameConfig {
   generations: number[];
   gym_interval: number;
   total_encounters: number;
   chaos_move_randomizer: boolean;
+  preferred_format: BattleFormat;
 }
 
 interface NewGameFormProps {
@@ -17,6 +20,7 @@ export function NewGameForm({ onSubmit, loading }: NewGameFormProps) {
   const [gymInterval, setGymInterval] = useState(5);
   const [totalEncounters, setTotalEncounters] = useState(20);
   const [chaosMode, setChaosMode] = useState(false);
+  const [preferredFormat, setPreferredFormat] = useState<BattleFormat>('Single');
 
   const allGenerations = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
@@ -47,6 +51,7 @@ export function NewGameForm({ onSubmit, loading }: NewGameFormProps) {
       gym_interval: gymInterval,
       total_encounters: totalEncounters,
       chaos_move_randomizer: chaosMode,
+      preferred_format: preferredFormat,
     });
   };
 
@@ -248,6 +253,93 @@ export function NewGameForm({ onSubmit, loading }: NewGameFormProps) {
             />
             <p style={{ fontSize: '14px', color: '#666', marginTop: '8px', fontStyle: 'italic' }}>
               Total de encuentros necesarios para completar la partida
+            </p>
+          </div>
+
+          {/* Selector de Formato de Liga */}
+          <div style={{ marginBottom: '30px' }}>
+            <label
+              style={{
+                display: 'block',
+                marginBottom: '12px',
+                fontSize: '18px',
+                fontWeight: 'bold',
+                color: '#1a1a1a',
+              }}
+            >
+              Formato de Liga (Gyms)
+            </label>
+            <div
+              style={{
+                display: 'flex',
+                gap: '10px',
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setPreferredFormat('Single')}
+                disabled={loading}
+                style={{
+                  flex: 1,
+                  padding: '16px',
+                  fontSize: '16px',
+                  fontWeight: 'bold',
+                  border: '2px solid',
+                  borderRadius: '8px',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.2s',
+                  backgroundColor: preferredFormat === 'Single' ? '#4CAF50' : '#f5f5f5',
+                  borderColor: preferredFormat === 'Single' ? '#45a049' : '#ddd',
+                  color: preferredFormat === 'Single' ? '#ffffff' : '#333',
+                  opacity: loading ? 0.6 : 1,
+                }}
+                onMouseEnter={(e) => {
+                  if (!loading && preferredFormat !== 'Single') {
+                    e.currentTarget.style.backgroundColor = '#e0e0e0';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!loading && preferredFormat !== 'Single') {
+                    e.currentTarget.style.backgroundColor = '#f5f5f5';
+                  }
+                }}
+              >
+                Individuales (1v1)
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreferredFormat('Double')}
+                disabled={loading}
+                style={{
+                  flex: 1,
+                  padding: '16px',
+                  fontSize: '16px',
+                  fontWeight: 'bold',
+                  border: '2px solid',
+                  borderRadius: '8px',
+                  cursor: loading ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.2s',
+                  backgroundColor: preferredFormat === 'Double' ? '#2196F3' : '#f5f5f5',
+                  borderColor: preferredFormat === 'Double' ? '#1976D2' : '#ddd',
+                  color: preferredFormat === 'Double' ? '#ffffff' : '#333',
+                  opacity: loading ? 0.6 : 1,
+                }}
+                onMouseEnter={(e) => {
+                  if (!loading && preferredFormat !== 'Double') {
+                    e.currentTarget.style.backgroundColor = '#e0e0e0';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!loading && preferredFormat !== 'Double') {
+                    e.currentTarget.style.backgroundColor = '#f5f5f5';
+                  }
+                }}
+              >
+                Dobles (VGC)
+              </button>
+            </div>
+            <p style={{ fontSize: '14px', color: '#666', marginTop: '8px', fontStyle: 'italic' }}>
+              Nota: Los encuentros salvajes siempre son Individuales (1v1)
             </p>
           </div>
 
