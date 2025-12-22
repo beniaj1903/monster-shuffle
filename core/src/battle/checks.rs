@@ -104,7 +104,8 @@ pub fn create_struggle_move() -> MoveData {
 /// Retorna (puede_moverse, logs)
 pub(crate) fn can_pokemon_move(pokemon: &mut PokemonInstance, rng: &mut StdRng) -> (bool, Vec<String>) {
     let mut logs = Vec::new();
-    
+
+    // Primero verificar status conditions permanentes
     if let Some(status) = &pokemon.status_condition {
         match status {
             StatusCondition::Sleep => {
@@ -158,7 +159,61 @@ pub(crate) fn can_pokemon_move(pokemon: &mut PokemonInstance, rng: &mut StdRng) 
             }
         }
     }
-    
+
+    // Luego verificar confusion (volatile status)
+    if let Some(ref mut volatile) = pokemon.volatile_status {
+        if volatile.confused {
+            logs.push(format!("¡{} está confundido!", pokemon.species.display_name));
+
+            // 50% de probabilidad de golpearse a sí mismo
+            if rng.gen_bool(0.5) {
+                // Aplicar daño por confusión (40 de power, físico, sin STAB)
+                let confusion_damage = calculate_confusion_damage(pokemon);
+                pokemon.current_hp = pokemon.current_hp.saturating_sub(confusion_damage);
+
+                logs.push(format!(
+                    "¡{} se golpeó a sí mismo en confusión y perdió {} HP!",
+                    pokemon.species.display_name,
+                    confusion_damage
+                ));
+                return (false, logs);
+            } else {
+                logs.push(format!("¡{} superó la confusión este turno!", pokemon.species.display_name));
+            }
+        }
+    }
+
     (true, logs)
+}
+
+/// Calcula el daño que un Pokémon se inflige a sí mismo por confusión
+/// Usa power 40, tipo físico, sin STAB ni efectividad
+fn calculate_confusion_damage(pokemon: &PokemonInstance) -> u16 {
+    let level = pokemon.level;
+    let attack = pokemon.base_computed_stats.attack;
+    let defense = pokemon.base_computed_stats.defense;
+    let power = 40;
+
+    // Fórmula simplificada: ((2 * Level / 5 + 2) * Power * A / D) / 50 + 2
+    let base_damage = ((2 * level as u32 / 5 + 2) * power * attack as u32 / defense as u32) / 50 + 2;
+
+    // Aplicar stages si existen
+    let mut final_damage = base_damage as f32;
+    if let Some(stages) = &pokemon.battle_stages {
+        let attack_multiplier = get_stat_multiplier(stages.attack);
+        let defense_multiplier = get_stat_multiplier(stages.defense);
+        final_damage *= attack_multiplier / defense_multiplier;
+    }
+
+    final_damage as u16
+}
+
+/// Obtiene el multiplicador de stat basado en el stage (-6 a +6)
+fn get_stat_multiplier(stage: i8) -> f32 {
+    if stage >= 0 {
+        (2.0 + stage as f32) / 2.0
+    } else {
+        2.0 / (2.0 - stage as f32)
+    }
 }
 

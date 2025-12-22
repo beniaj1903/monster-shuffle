@@ -634,26 +634,50 @@ fn apply_on_entry_stat_change(
         StatChangeTarget::AllOpponents => {
             if is_player {
                 // Afectar a todos los oponentes
+                logs.push(format!("{}'s {}!", pokemon_name, ability_name));
                 for &opp_idx in &battle_state.opponent_active_indices {
                     if let Some(opp) = opponent_team.get_mut(opp_idx) {
-                        apply_stat_stage_change(opp, stat, stages);
-                        let change_text = if stages > 0 { "rose" } else { "fell" };
-                        logs.push(format!("{}'s {} {}!", opp.species.display_name, stat, change_text));
+                        // Verificar inmunidad antes de aplicar
+                        let has_immunity = stages < 0 && (
+                            opp.ability == "clear-body" ||
+                            opp.ability == "white-smoke" ||
+                            opp.ability == "full-metal-body" ||
+                            (opp.ability == "hyper-cutter" && stat == "attack") ||
+                            (opp.ability == "keen-eye" && stat == "accuracy")
+                        );
+
+                        if has_immunity {
+                            logs.push(format!("{}'s ability prevents stat loss!", opp.species.display_name));
+                        } else {
+                            apply_stat_stage_change(opp, stat, stages);
+                            let change_text = if stages > 0 { "rose" } else { "fell" };
+                            logs.push(format!("{}'s {} {}!", opp.species.display_name, stat, change_text));
+                        }
                     }
                 }
-                logs.insert(logs.len() - battle_state.opponent_active_indices.len(),
-                    format!("{}'s {}!", pokemon_name, ability_name));
             } else {
                 // Afectar a todos los jugadores
+                logs.push(format!("{}'s {}!", pokemon_name, ability_name));
                 for &player_idx in &battle_state.player_active_indices {
                     if let Some(player) = player_team.active_members.get_mut(player_idx) {
-                        apply_stat_stage_change(player, stat, stages);
-                        let change_text = if stages > 0 { "rose" } else { "fell" };
-                        logs.push(format!("{}'s {} {}!", player.species.display_name, stat, change_text));
+                        // Verificar inmunidad antes de aplicar
+                        let has_immunity = stages < 0 && (
+                            player.ability == "clear-body" ||
+                            player.ability == "white-smoke" ||
+                            player.ability == "full-metal-body" ||
+                            (player.ability == "hyper-cutter" && stat == "attack") ||
+                            (player.ability == "keen-eye" && stat == "accuracy")
+                        );
+
+                        if has_immunity {
+                            logs.push(format!("{}'s ability prevents stat loss!", player.species.display_name));
+                        } else {
+                            apply_stat_stage_change(player, stat, stages);
+                            let change_text = if stages > 0 { "rose" } else { "fell" };
+                            logs.push(format!("{}'s {} {}!", player.species.display_name, stat, change_text));
+                        }
                     }
                 }
-                logs.insert(logs.len() - battle_state.player_active_indices.len(),
-                    format!("{}'s {}!", pokemon_name, ability_name));
             }
         },
         StatChangeTarget::User => {
@@ -679,6 +703,23 @@ fn apply_on_entry_stat_change(
 
 /// Aplica un cambio de stages a un stat específico
 fn apply_stat_stage_change(pokemon: &mut PokemonInstance, stat: &str, stages: i8) {
+    // Verificar inmunidad a bajadas de stats
+    if stages < 0 {
+        let ability = &pokemon.ability;
+        // Clear Body, White Smoke, Full Metal Body: inmunidad a todas las bajadas
+        if ability == "clear-body" || ability == "white-smoke" || ability == "full-metal-body" {
+            return;
+        }
+        // Hyper Cutter: inmunidad a bajada de Attack
+        if ability == "hyper-cutter" && stat == "attack" {
+            return;
+        }
+        // Keen Eye: inmunidad a bajada de Accuracy
+        if ability == "keen-eye" && stat == "accuracy" {
+            return;
+        }
+    }
+
     if let Some(ref mut battle_stages) = pokemon.battle_stages {
         match stat {
             "attack" => battle_stages.attack = (battle_stages.attack + stages).clamp(-6, 6),
@@ -784,6 +825,56 @@ fn process_end_of_turn_residuals(
             if terrain.turns_remaining == 0 {
                 logs.push("¡El terreno volvió a la normalidad!".to_string());
                 battle_state.terrain = None;
+            }
+        }
+    }
+
+    // 2.5. Aplicar curación de Grassy Terrain a Pokémon grounded
+    if let Some(ref terrain) = battle_state.terrain {
+        use crate::models::TerrainType;
+        use super::effects::is_grounded;
+
+        if terrain.terrain_type == TerrainType::Grassy {
+            // Curar jugadores grounded
+            for &idx in &battle_state.player_active_indices.clone() {
+                if let Some(pokemon) = player_team.active_members.get_mut(idx) {
+                    if pokemon.current_hp > 0 && is_grounded(pokemon) {
+                        let max_hp = pokemon.base_computed_stats.hp;
+                        let heal_amount = max_hp / 16;
+                        let old_hp = pokemon.current_hp;
+                        pokemon.current_hp = (pokemon.current_hp + heal_amount).min(max_hp);
+                        let actual_heal = pokemon.current_hp - old_hp;
+
+                        if actual_heal > 0 {
+                            logs.push(format!(
+                                "¡{} se curó {} HP por Grassy Terrain!",
+                                pokemon.species.display_name,
+                                actual_heal
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Curar oponentes grounded
+            for &idx in &battle_state.opponent_active_indices.clone() {
+                if let Some(pokemon) = opponent_team.get_mut(idx) {
+                    if pokemon.current_hp > 0 && is_grounded(pokemon) {
+                        let max_hp = pokemon.base_computed_stats.hp;
+                        let heal_amount = max_hp / 16;
+                        let old_hp = pokemon.current_hp;
+                        pokemon.current_hp = (pokemon.current_hp + heal_amount).min(max_hp);
+                        let actual_heal = pokemon.current_hp - old_hp;
+
+                        if actual_heal > 0 {
+                            logs.push(format!(
+                                "¡{} se curó {} HP por Grassy Terrain!",
+                                pokemon.species.display_name,
+                                actual_heal
+                            ));
+                        }
+                    }
+                }
             }
         }
     }

@@ -286,6 +286,9 @@ pub struct VolatileStatus {
     pub must_recharge: bool,
     /// ID del movimiento que está cargando (Solar Beam, etc.)
     pub charging_move: Option<String>,
+    /// Contador de turnos con BadPoison para daño escalante (Toxic)
+    #[serde(default)]
+    pub badly_poisoned_turns: u8,
 }
 
 impl VolatileStatus {
@@ -299,6 +302,7 @@ impl VolatileStatus {
             protect_counter: 0,
             must_recharge: false,
             charging_move: None,
+            badly_poisoned_turns: 0,
         }
     }
 

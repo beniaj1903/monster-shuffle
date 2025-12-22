@@ -307,16 +307,36 @@ pub fn apply_residual_effects(pokemon: &mut PokemonInstance) -> (u16, Vec<String
                 ));
             }
             StatusCondition::BadPoison => {
-                // Toxic: aumenta el daño cada turno (simplificado: daño fijo alto)
+                // Toxic: aumenta el daño cada turno (1/16, 2/16, 3/16, etc.)
                 let max_hp = pokemon.base_computed_stats.hp;
-                let damage = max_hp / 4;
-                let actual_damage = damage.min(pokemon.current_hp);
-                pokemon.current_hp = pokemon.current_hp.saturating_sub(damage);
-                total_damage = actual_damage;
-                logs.push(format!(
-                    "¡{} sufre gravemente por el veneno!",
-                    pokemon.species.display_name
-                ));
+
+                // Incrementar contador de turnos con BadPoison
+                if let Some(ref mut volatile) = pokemon.volatile_status {
+                    volatile.badly_poisoned_turns += 1;
+                    let turns = volatile.badly_poisoned_turns as u16;
+
+                    // Daño escala: (max_hp / 16) * turns
+                    let damage = (max_hp / 16) * turns;
+                    let actual_damage = damage.min(pokemon.current_hp);
+                    pokemon.current_hp = pokemon.current_hp.saturating_sub(damage);
+                    total_damage = actual_damage;
+
+                    logs.push(format!(
+                        "¡{} sufre gravemente por el veneno! (turno {})",
+                        pokemon.species.display_name,
+                        turns
+                    ));
+                } else {
+                    // Fallback si no tiene volatile_status (no debería pasar)
+                    let damage = max_hp / 8;
+                    let actual_damage = damage.min(pokemon.current_hp);
+                    pokemon.current_hp = pokemon.current_hp.saturating_sub(damage);
+                    total_damage = actual_damage;
+                    logs.push(format!(
+                        "¡{} sufre gravemente por el veneno!",
+                        pokemon.species.display_name
+                    ));
+                }
             }
             _ => {
                 // Freeze, Sleep, Paralysis no causan daño residual
