@@ -6,10 +6,12 @@ use crate::models::{PokemonInstance, MoveData};
 use crate::game::BattleState;
 use super::{get_ability_hooks, AbilityTrigger, AbilityEffect};
 use super::super::damage_system::get_effective_speed;
+use super::super::item_system::ItemProcessor;
 
-/// Calcula la velocidad de un Pokémon incluyendo modificadores de habilidades
+/// Calcula la velocidad de un Pokémon incluyendo modificadores de habilidades e items
 ///
 /// Aplica multiplicadores basados en clima/terreno (Chlorophyll, Swift Swim, etc.)
+/// y items (Choice Scarf)
 pub fn get_speed_with_abilities(
     pokemon: &PokemonInstance,
     battle_state: &BattleState,
@@ -18,14 +20,16 @@ pub fn get_speed_with_abilities(
     let ability_id = &pokemon.ability;
     let hooks = get_ability_hooks(ability_id);
 
-    // Buscar modificadores de velocidad
+    let mut final_speed = base_speed as f32;
+
+    // Aplicar multiplicadores de habilidades
     for hook in hooks.iter().filter(|h| matches!(h.trigger, AbilityTrigger::ModifySpeed)) {
         match &hook.effect {
             AbilityEffect::MultiplySpeedInWeather { weather, multiplier } => {
                 // Verificar si el clima activo coincide
                 if let Some(current_weather) = &battle_state.weather {
                     if current_weather.weather_type == *weather {
-                        return (base_speed as f32 * multiplier) as u16;
+                        final_speed *= multiplier;
                     }
                 }
             },
@@ -33,7 +37,7 @@ pub fn get_speed_with_abilities(
                 // Verificar si el terreno activo coincide
                 if let Some(current_terrain) = &battle_state.terrain {
                     if current_terrain.terrain_type == *terrain {
-                        return (base_speed as f32 * multiplier) as u16;
+                        final_speed *= multiplier;
                     }
                 }
             },
@@ -41,7 +45,11 @@ pub fn get_speed_with_abilities(
         }
     }
 
-    base_speed
+    // Aplicar multiplicador de Choice Scarf (+50% Speed)
+    let item_speed_multiplier = ItemProcessor::get_speed_multiplier(pokemon);
+    final_speed *= item_speed_multiplier;
+
+    final_speed as u16
 }
 
 /// Calcula la prioridad de un movimiento incluyendo modificadores de habilidades

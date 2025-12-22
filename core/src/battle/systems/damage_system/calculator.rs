@@ -3,6 +3,7 @@ use rand::Rng;
 use crate::models::{MoveData, PokemonInstance, PokemonType, StatusCondition, WeatherState, TerrainState, WeatherType};
 use super::super::super::effects::{is_grounded, check_ability_immunity, modify_offensive_stat_by_ability};
 use super::super::ability_system::{get_ability_hooks, AbilityTrigger, AbilityEffect};
+use super::super::item_system::ItemProcessor;
 
 /// Calcula el daño de un movimiento
 /// Retorna (daño, mensaje de efectividad, es_crítico)
@@ -115,9 +116,16 @@ pub fn calculate_damage(
     // Hook: Modificar stat defensivo basado en clima (Sandstorm para Rock, Hail para Ice)
     let weather_defense_multiplier = modify_defensive_stat_by_weather(weather, defender, defense_stat_name);
 
+    // Hook: Aplicar multiplicador de Assault Vest (+50% Sp. Defense)
+    let item_defense_multiplier = if defense_stat_name == "special_defense" {
+        ItemProcessor::get_sp_defense_multiplier(defender)
+    } else {
+        1.0
+    };
+
     // Calcular stats efectivos (aplicar multiplicador de habilidad al ataque y clima a la defensa)
     let attack = (base_attack_stat as f32) * attack_multiplier * ability_multiplier;
-    let defense = (base_defense_stat as f32) * defense_multiplier * weather_defense_multiplier;
+    let defense = (base_defense_stat as f32) * defense_multiplier * weather_defense_multiplier * item_defense_multiplier;
 
     // Fórmula de daño Gen 3+
     // Damage = ((((2 * Level / 5 + 2) * Power * A / D) / 50) + 2) * Modifiers
@@ -140,6 +148,10 @@ pub fn calculate_damage(
     // Hook: Aplicar multiplicadores de habilidades de daño (Tough Claws, Sheer Force, Technician, etc.)
     let ability_damage_mod = apply_ability_damage_multiplier(attacker, move_data, &move_type);
     modifiers *= ability_damage_mod;
+
+    // Hook: Aplicar multiplicadores de items (Choice Band/Specs, Life Orb)
+    let item_damage_mod = ItemProcessor::get_damage_multiplier(attacker, &move_data.damage_class);
+    modifiers *= item_damage_mod;
 
     // Efecto de Quemadura (Burn): reduce el daño físico a la mitad
     if move_data.damage_class == "physical" && attacker.status_condition == Some(StatusCondition::Burn) {

@@ -9,6 +9,7 @@ use super::effects::{apply_weather_residuals, apply_residual_effects};
 use super::systems::validation_system::consume_move_pp;
 use super::ability_logic::{get_ability_hooks, AbilityTrigger, AbilityEffect, StatChangeTarget};
 use super::systems::ability_system::{get_speed_with_abilities, get_priority_with_abilities};
+use super::systems::item_system::ItemProcessor;
 use super::{BattleOutcome, TurnResult};
 
 // Importar desde los nuevos módulos de infraestructura y sistemas
@@ -320,6 +321,20 @@ fn process_move_hit(
     }
     if let Some(defender) = get_pokemon_mut(target_pos, defender_index, battle_state, player_team, opponent_team) {
         *defender = final_defender.clone();
+    }
+
+    // Procesar items después de causar daño (Life Orb recoil)
+    if damage > 0 {
+        if let Some(attacker) = get_pokemon_mut(candidate.position, attacker_index, battle_state, player_team, opponent_team) {
+            let item_result = ItemProcessor::process_after_damage(
+                attacker,
+                &candidate.move_template_id,
+                damage,
+            );
+
+            // Agregar logs del item
+            result.logs.extend(item_result.logs);
+        }
     }
 
     result
@@ -950,6 +965,27 @@ fn process_end_of_turn_residuals(
         if let Some(pokemon) = opponent_team.get_mut(idx) {
             if pokemon.current_hp > 0 {
                 apply_end_of_turn_abilities(pokemon, battle_state, logs);
+            }
+        }
+    }
+
+    // 6. Procesar items end of turn (Sitrus Berry si HP < 50%)
+    // Jugador
+    for &idx in &battle_state.player_active_indices.clone() {
+        if let Some(pokemon) = player_team.active_members.get_mut(idx) {
+            if pokemon.current_hp > 0 {
+                let item_result = ItemProcessor::process_end_of_turn(pokemon);
+                logs.extend(item_result.logs);
+            }
+        }
+    }
+
+    // Oponente
+    for &idx in &battle_state.opponent_active_indices.clone() {
+        if let Some(pokemon) = opponent_team.get_mut(idx) {
+            if pokemon.current_hp > 0 {
+                let item_result = ItemProcessor::process_end_of_turn(pokemon);
+                logs.extend(item_result.logs);
             }
         }
     }

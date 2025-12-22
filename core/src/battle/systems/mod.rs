@@ -10,3 +10,4 @@ pub mod move_system;
 pub mod effect_system;
 pub mod ai_system;
 pub mod validation_system;
+pub mod item_system;

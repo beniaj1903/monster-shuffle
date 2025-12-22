@@ -5,6 +5,7 @@ use super::super::super::checks::{can_pokemon_move, check_ailment_success};
 use super::super::damage_system::{calculate_damage, check_critical_hit, calculate_hit_count};
 use super::super::effect_system::is_grounded;
 use super::super::ability_system::{get_ability_hooks, AbilityTrigger, AbilityEffect};
+use super::super::item_system::ItemProcessor;
 
 /// Contexto de batalla para procesar un ataque individual
 /// Implementa el patrón Pipeline para organizar la lógica de batalla
@@ -239,7 +240,44 @@ impl<'a> BattleContext<'a> {
                 return;
             }
         }
-        
+
+        // Procesar Weakness Policy (si recibió golpe super efectivo)
+        if damage_dealt > 0 && self.move_data.power.is_some() {
+            use super::super::damage_system::calculator::{parse_type, get_type_effectiveness};
+
+            let move_type = parse_type(&self.move_data.r#type);
+            let mut defender_types = vec![self.defender.randomized_profile.rolled_primary_type];
+            if let Some(secondary) = self.defender.randomized_profile.rolled_secondary_type {
+                defender_types.push(secondary);
+            }
+
+            let type_effectiveness = get_type_effectiveness(&move_type, &defender_types);
+            let is_super_effective = type_effectiveness >= 2.0;
+
+            if is_super_effective {
+                let item_result = ItemProcessor::process_on_damage_taken(
+                    &mut self.defender,
+                    damage_dealt,
+                    &self.attacker.id,
+                    true
+                );
+
+                // Aplicar stat boosts de Weakness Policy
+                if !item_result.stat_boosts.is_empty() {
+                    if self.defender.battle_stages.is_none() {
+                        self.defender.init_battle_stages();
+                    }
+                    if let Some(ref mut stages) = self.defender.battle_stages {
+                        for (stat, boost) in &item_result.stat_boosts {
+                            stages.apply_change(stat, *boost);
+                        }
+                    }
+                }
+
+                self.logs.extend(item_result.logs);
+            }
+        }
+
         // Aplicar cambios de stats
         if !self.move_data.stat_changes.is_empty() {
             let stat_chance = if self.move_data.meta.stat_chance == 0 {
@@ -437,6 +475,21 @@ impl<'a> BattleContext<'a> {
                             self.defender.species.display_name,
                             status_msg
                         ));
+
+                        // Procesar Lum Berry (cura inmediatamente el status aplicado)
+                        let status_name = match status_condition {
+                            StatusCondition::Burn => "burn",
+                            StatusCondition::Paralysis => "paralysis",
+                            StatusCondition::Poison => "poison",
+                            StatusCondition::BadPoison => "bad-poison",
+                            StatusCondition::Sleep => "sleep",
+                            StatusCondition::Freeze => "freeze",
+                        };
+                        let item_result = ItemProcessor::process_on_status_applied(
+                            &mut self.defender,
+                            status_name
+                        );
+                        self.logs.extend(item_result.logs);
                     }
                 }
             }
