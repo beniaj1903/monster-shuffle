@@ -4,7 +4,7 @@
 //! para los oponentes controlados por IA.
 
 use crate::models::PokemonInstance;
-use super::super::super::checks::has_moves_with_pp;
+use super::super::validation_system::has_moves_with_pp;
 
 /// Selecciona un movimiento para la IA del oponente
 ///

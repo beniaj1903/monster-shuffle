@@ -5,10 +5,10 @@ use crate::models::{MoveData, PokemonInstance, FieldPosition, BattleFormat, Weat
 use crate::game::{BattleState, PlayerTeam};
 use super::context::BattleContext;
 use super::targeting::resolve_targets;
-use super::mechanics::get_effective_speed;
 use super::effects::{apply_weather_residuals, apply_residual_effects};
-use super::checks::consume_move_pp;
+use super::systems::validation_system::consume_move_pp;
 use super::ability_logic::{get_ability_hooks, AbilityTrigger, AbilityEffect, StatChangeTarget};
+use super::systems::ability_system::{get_speed_with_abilities, get_priority_with_abilities};
 use super::{BattleOutcome, TurnResult};
 
 // Importar desde los nuevos módulos de infraestructura y sistemas
@@ -18,46 +18,11 @@ use super::infrastructure::{
 use super::systems::ai_system::select_ai_move;
 use super::systems::validation_system::reset_turn_flags;
 use super::systems::action_system::ActionCandidate;
+use super::orchestration::battle_engine::check_battle_state;
 
 // MIGRADO: ActionCandidate ahora está en systems/action_system/models.rs
-
-/// Determina el resultado cuando el jugador se debilita
-/// Verifica si hay más Pokémon del jugador disponibles
-fn determine_player_outcome(player_team: &PlayerTeam, battle_state: &BattleState) -> BattleOutcome {
-    // Buscar si hay otro Pokémon del jugador disponible
-    let has_more_pokemon = player_team.active_members.iter()
-        .enumerate()
-        .any(|(i, p)| !battle_state.player_active_indices.contains(&i) && p.current_hp > 0);
-
-    if has_more_pokemon {
-        BattleOutcome::PlayerMustSwitch
-    } else {
-        BattleOutcome::PlayerLost
-    }
-}
-
-/// Determina el resultado cuando el enemigo se debilita
-/// Verifica si hay más enemigos disponibles en el equipo
-/// Si hay más enemigos, cambia al siguiente y retorna EnemySwitched
-/// Si no hay más, retorna PlayerWon
-fn determine_enemy_outcome(battle_state: &mut BattleState, logs: &mut Vec<String>) -> BattleOutcome {
-    // Buscar si hay otro Pokémon enemigo disponible
-    if battle_state.switch_to_next_opponent() {
-        // El enemigo cambió de Pokémon
-        let next_opponent = battle_state.get_opponent_active().clone();
-        let opponent_name = battle_state.opponent_name.clone().unwrap_or_else(|| "El entrenador".to_string());
-        logs.push(format!(
-            "{} envió a {}!",
-            opponent_name,
-            next_opponent.species.display_name
-        ));
-
-        BattleOutcome::EnemySwitched
-    } else {
-        // No hay más enemigos - jugador ganó
-        BattleOutcome::PlayerWon
-    }
-}
+// MIGRADO: determine_player_outcome, determine_enemy_outcome, check_battle_state
+// ahora están en orchestration/battle_engine.rs
 
 /// Ejecuta un turno completo de batalla usando una cola de prioridad global
 ///
@@ -480,92 +445,8 @@ fn sort_candidates(candidates: &mut Vec<ActionCandidate>, rng: &mut StdRng) {
     *candidates = with_random.into_iter().map(|(c, _)| c).collect();
 }
 
-/// Calcula la velocidad efectiva de un Pokémon incluyendo modificadores de habilidades
-fn get_speed_with_abilities(
-    pokemon: &PokemonInstance,
-    battle_state: &BattleState,
-) -> u16 {
-    let base_speed = get_effective_speed(pokemon) as u16;
-    let ability_id = &pokemon.ability;
-    let hooks = get_ability_hooks(ability_id);
-
-    // Buscar modificadores de velocidad
-    for hook in hooks.iter().filter(|h| matches!(h.trigger, AbilityTrigger::ModifySpeed)) {
-        match &hook.effect {
-            AbilityEffect::MultiplySpeedInWeather { weather, multiplier } => {
-                // Verificar si el clima activo coincide
-                if let Some(current_weather) = &battle_state.weather {
-                    if current_weather.weather_type == *weather {
-                        return (base_speed as f32 * multiplier) as u16;
-                    }
-                }
-            },
-            AbilityEffect::MultiplySpeedInTerrain { terrain, multiplier } => {
-                // Verificar si el terreno activo coincide
-                if let Some(current_terrain) = &battle_state.terrain {
-                    if current_terrain.terrain_type == *terrain {
-                        return (base_speed as f32 * multiplier) as u16;
-                    }
-                }
-            },
-            _ => {},
-        }
-    }
-
-    base_speed
-}
-
-/// Calcula la prioridad de un movimiento incluyendo modificadores de habilidades
-fn get_priority_with_abilities(
-    pokemon: &PokemonInstance,
-    move_data: &MoveData,
-) -> i8 {
-    use super::ability_logic::PriorityCondition;
-    use crate::models::StatusCondition;
-
-    let base_priority = move_data.priority;
-    let ability_id = &pokemon.ability;
-    let hooks = get_ability_hooks(ability_id);
-
-    // Buscar modificadores de prioridad
-    for hook in hooks.iter().filter(|h| matches!(h.trigger, AbilityTrigger::ModifyPriority)) {
-        if let AbilityEffect::ModifyMovePriority { move_type, priority_boost, condition } = &hook.effect {
-            // Verificar si el tipo de movimiento coincide (si se especifica)
-            let type_matches = if let Some(_required_type) = move_type {
-                // TODO: Comparar con el tipo del movimiento cuando esté disponible
-                // Por ahora, asumimos que el tipo coincide si es Flying para Gale Wings
-                true
-            } else {
-                // Prankster: solo funciona en movimientos de estado (power = None o power = 0)
-                move_data.power.is_none() || move_data.power.unwrap_or(0) == 0
-            };
-
-            if !type_matches {
-                continue;
-            }
-
-            // Verificar condiciones adicionales
-            let condition_met = if let Some(cond) = condition {
-                match cond {
-                    PriorityCondition::FullHP => {
-                        pokemon.current_hp == pokemon.base_computed_stats.hp
-                    },
-                    PriorityCondition::Poisoned => {
-                        matches!(pokemon.status_condition, Some(StatusCondition::Poison) | Some(StatusCondition::BadPoison))
-                    },
-                }
-            } else {
-                true
-            };
-
-            if condition_met {
-                return base_priority + priority_boost;
-            }
-        }
-    }
-
-    base_priority
-}
+// MIGRADO: get_speed_with_abilities y get_priority_with_abilities ahora están en
+// systems/ability_system/processor.rs
 
 // MIGRADO: resolve_move_data ahora está en infrastructure/move_data_loader.rs
 
@@ -983,41 +864,7 @@ fn process_end_of_turn_residuals(
     }
 }
 
-/// Verifica el estado de la batalla y determina el resultado
-fn check_battle_state(
-    battle_state: &mut BattleState,
-    player_team: &PlayerTeam,
-    logs: &mut Vec<String>,
-) -> BattleOutcome {
-    // Verificar si todos los Pokémon activos del jugador están debilitados
-    let all_player_active_fainted = battle_state.player_active_indices.iter().all(|&idx| {
-        player_team.active_members.get(idx).map(|p| p.current_hp == 0).unwrap_or(true)
-    });
-
-    // Verificar si todos los Pokémon activos del oponente están debilitados
-    let all_opponent_active_fainted = if battle_state.is_trainer_battle {
-        battle_state.opponent_active_indices.iter().all(|&idx| {
-            battle_state.opponent_team.get(idx).map(|p| p.current_hp == 0).unwrap_or(true)
-        })
-    } else {
-        battle_state.opponent_instance.current_hp == 0
-    };
-
-    // Si todos los oponentes activos están debilitados
-    if all_opponent_active_fainted {
-        // Intentar cambiar a un nuevo oponente
-        return determine_enemy_outcome(battle_state, logs);
-    }
-
-    // Si todos los jugadores activos están debilitados
-    if all_player_active_fainted {
-        // Verificar si hay más Pokémon disponibles
-        return determine_player_outcome(player_team, battle_state);
-    }
-
-    // La batalla continúa
-    BattleOutcome::Continue
-}
+// MIGRADO: check_battle_state ahora está en orchestration/battle_engine.rs
 
 // MIGRADO: Las siguientes funciones ahora están en infrastructure/pokemon_accessor.rs
 // - is_pokemon_alive

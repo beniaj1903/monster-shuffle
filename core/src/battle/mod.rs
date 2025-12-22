@@ -57,8 +57,11 @@ pub use effects::{
     apply_weather_residuals,
     apply_residual_effects,
 };
-pub use checks::{
-    check_ailment_success,
+// Re-exportar funciones de checks (estado)
+pub use checks::check_ailment_success;
+
+// Re-exportar funciones de validation_system (PP)
+pub use systems::validation_system::{
     initialize_move_pp,
     consume_move_pp,
     has_moves_with_pp,

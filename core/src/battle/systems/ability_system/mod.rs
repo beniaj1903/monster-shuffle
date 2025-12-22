@@ -7,6 +7,7 @@
 
 pub mod registry;
 pub mod triggers;
+pub mod processor;
 
 // Re-exportar tipos y funciones principales del registry
 pub use registry::{
@@ -14,6 +15,11 @@ pub use registry::{
     get_ability_hooks,
 };
 
-// NOTA: handle_entry_hazards, apply_end_of_turn_abilities, get_speed_with_abilities,
-// get_priority_with_abilities permanecen en pipeline.rs por ahora
-// Se migrarán al módulo processor.rs en una fase posterior
+// Re-exportar funciones del processor
+pub use processor::{
+    get_speed_with_abilities,
+    get_priority_with_abilities,
+};
+
+// NOTA: handle_entry_hazards, apply_end_of_turn_abilities
+// permanecen en pipeline.rs por ahora debido a su complejidad y dependencias

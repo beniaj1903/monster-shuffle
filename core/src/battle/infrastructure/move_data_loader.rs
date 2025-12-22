@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use crate::models::MoveData;
-use super::super::checks::create_struggle_move;
+use super::super::systems::validation_system::create_struggle_move;
 
 /// Resuelve los datos de un movimiento desde el pool global
 ///
