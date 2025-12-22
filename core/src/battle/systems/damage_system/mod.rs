@@ -6,11 +6,13 @@
 //! - Calcular críticos
 //! - Calcular efectividad de tipos
 
-// TODO: Fase 2 - Mover lógica de mechanics.rs aquí
-// - calculate_damage
-// - check_critical_hit
-// - calculate_hit_count
-// - get_type_effectiveness
-// - apply_weather_damage_mod
-// - apply_terrain_damage_mod
-// - apply_ability_damage_multiplier
+pub mod calculator;
+
+// Re-exportar funciones principales
+pub use calculator::{
+    calculate_damage,
+    check_critical_hit,
+    calculate_hit_count,
+    get_type_effectiveness,
+    get_effective_speed,
+};

@@ -309,11 +309,12 @@ pub async fn explore(
         // Usar el formato preferido de la configuración de la sesión
         let preferred_format = session.config.preferred_format;
         eprintln!("[DEBUG] explore: Creando batalla de gimnasio con formato: {:?}", preferred_format);
-        let battle_state = BattleState::new_trainer_battle(
+        let battle_state = BattleState::new(
             0, // El jugador usa su primer Pokémon
             opponent_team,
             leader_name.clone(),
-            preferred_format,
+            preferred_format,   
+            true,
         );
         eprintln!("[DEBUG] explore: BattleState creado - format: {:?}, player_active_indices: {:?}, opponent_active_indices: {:?}", 
             battle_state.format, battle_state.player_active_indices, battle_state.opponent_active_indices);
@@ -482,19 +483,15 @@ pub async fn select_encounter(
         selected_pokemon.init_battle_stages();
     }
 
-    // Crear el estado de batalla contra el Pokémon salvaje
-    // IMPORTANTE: Los encuentros salvajes SIEMPRE son Single, independientemente de la configuración
+    let opponent_team = vec![selected_pokemon.clone()];
+
     let mut battle_state = BattleState::new(
-        0, // El jugador usa su primer Pokémon (índice 0)
-        selected_pokemon.clone(),
+        0, // El jugador empieza con su primer slot
+        opponent_team,
+        String::new(), // Batallas salvajes no tienen nombre de entrenador
+        BattleFormat::Single, // Salvajes SIEMPRE son Singles
+        false // is_trainer_battle = false
     );
-    // Forzar explícitamente Single para encuentros salvajes
-    eprintln!("[DEBUG] select_encounter: Forzando formato Single para encuentro salvaje (preferred_format era: {:?})", session.config.preferred_format);
-    battle_state.format = BattleFormat::Single;
-    battle_state.player_active_indices = vec![0];
-    battle_state.opponent_active_indices = vec![0];
-    eprintln!("[DEBUG] select_encounter: BattleState creado - format: {:?}, player_active_indices: {:?}, opponent_active_indices: {:?}", 
-        battle_state.format, battle_state.player_active_indices, battle_state.opponent_active_indices);
 
     // Inicializar battle_stages para los Pokémon del jugador al entrar en batalla
     if let Some(player_pokemon) = session.team.active_members.get_mut(0) {

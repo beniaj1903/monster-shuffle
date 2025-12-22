@@ -420,6 +420,9 @@ pub struct MoveMeta {
     /// Turnos máximos
     #[serde(default)]
     pub max_turns: Option<u8>,
+    /// Si el movimiento hace contacto físico (afecta habilidades como Rough Skin, Static, Tough Claws)
+    #[serde(default)]
+    pub makes_contact: bool,
 }
 
 impl Default for MoveMeta {
@@ -436,6 +439,7 @@ impl Default for MoveMeta {
             max_hits: None,
             min_turns: None,
             max_turns: None,
+            makes_contact: false,
         }
     }
 }

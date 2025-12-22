@@ -17,30 +17,9 @@ use super::infrastructure::{
 };
 use super::systems::ai_system::select_ai_move;
 use super::systems::validation_system::reset_turn_flags;
+use super::systems::action_system::ActionCandidate;
 
-/// Candidato de acción para la cola de prioridad global
-/// Representa un Pokémon que va a ejecutar una acción en este turno
-#[derive(Debug, Clone)]
-struct ActionCandidate {
-    /// Posición del Pokémon en el campo
-    position: FieldPosition,
-    /// Índice en el array correspondiente (player_active_indices o opponent_active_indices)
-    team_index: usize,
-    /// Si es del jugador (true) o del oponente (false)
-    is_player: bool,
-    /// Velocidad efectiva del Pokémon (considerando stages y parálisis)
-    speed: u16,
-    /// Prioridad del movimiento seleccionado
-    priority: i8,
-    /// Datos del movimiento seleccionado
-    move_data: MoveData,
-    /// ID del template del movimiento (para consumo de PP)
-    move_template_id: String,
-    /// Objetivo seleccionado (si aplica, para movimientos "selected-pokemon")
-    selected_target: Option<FieldPosition>,
-    /// Nombre del Pokémon para logs
-    pokemon_name: String,
-}
+// MIGRADO: ActionCandidate ahora está en systems/action_system/models.rs
 
 /// Determina el resultado cuando el jugador se debilita
 /// Verifica si hay más Pokémon del jugador disponibles

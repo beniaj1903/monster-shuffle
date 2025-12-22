@@ -4,6 +4,7 @@ use crate::models::{MoveData, PokemonInstance, WeatherState, TerrainState, Pokem
 use super::checks::{can_pokemon_move, check_ailment_success};
 use super::mechanics::{calculate_damage, check_critical_hit, calculate_hit_count};
 use super::effects::is_grounded;
+use super::ability_logic::{get_ability_hooks, AbilityTrigger, AbilityEffect};
 
 /// Contexto de batalla para procesar un ataque individual
 /// Implementa el patrón Pipeline para organizar la lógica de batalla
@@ -598,11 +599,17 @@ impl<'a> BattleContext<'a> {
             }
             
             // Si el movimiento se ejecutó completamente (no es carga), resetear charging_move
-            if volatile.charging_move.is_some() && 
+            if volatile.charging_move.is_some() &&
                !(self.move_data.meta.min_turns.is_some() && self.move_data.meta.max_turns.is_some()) {
                 // No es un movimiento de carga, resetear
                 volatile.charging_move = None;
             }
+        }
+
+        // Hook: Aplicar habilidades OnContact del defensor (Rough Skin, Static, Iron Barbs, etc.)
+        // Solo se activan si el movimiento hizo contacto y causó daño
+        if self.move_data.meta.makes_contact && damage_dealt > 0 && self.attacker.current_hp > 0 {
+            self.apply_on_contact_abilities();
         }
     }
     
@@ -675,6 +682,70 @@ impl<'a> BattleContext<'a> {
         }
         
         (total_damage, logs)
+    }
+
+    /// Aplica habilidades del defensor que se activan al recibir contacto
+    /// (Rough Skin, Static, Iron Barbs, Flame Body, etc.)
+    fn apply_on_contact_abilities(&mut self) {
+        let ability_id = &self.defender.ability.clone();
+        let hooks = get_ability_hooks(ability_id);
+
+        for hook in hooks.iter().filter(|h| matches!(h.trigger, AbilityTrigger::OnContact)) {
+            match &hook.effect {
+                // Habilidades que causan daño de reacción (Rough Skin, Iron Barbs)
+                AbilityEffect::DamageAttackerOnContact { damage_fraction } => {
+                    let damage = ((self.attacker.base_computed_stats.hp as f32) * damage_fraction) as u16;
+                    let actual_damage = damage.min(self.attacker.current_hp);
+
+                    if actual_damage > 0 {
+                        self.attacker.current_hp = self.attacker.current_hp.saturating_sub(actual_damage);
+                        self.logs.push(format!(
+                            "¡{} fue herido por {} de {}!",
+                            self.attacker_name,
+                            ability_id,
+                            self.defender_name
+                        ));
+                    }
+                },
+
+                // Habilidades que aplican estado al contacto (Static, Flame Body, Poison Point)
+                AbilityEffect::InflictStatusOnContact { status, chance } => {
+                    // Ya tiene un estado? No aplicar
+                    if self.attacker.status_condition.is_some() {
+                        continue;
+                    }
+
+                    // Verificar probabilidad
+                    let roll: f32 = self.rng.gen();
+                    if roll > *chance {
+                        continue;
+                    }
+
+                    // Aplicar el estado (ya viene como StatusCondition desde ability_logic)
+                    let status_condition = *status;
+                    self.attacker.status_condition = Some(status_condition);
+
+                    let status_name = match status_condition {
+                        StatusCondition::Paralysis => "paralizado",
+                        StatusCondition::Burn => "quemado",
+                        StatusCondition::Poison => "envenenado",
+                        StatusCondition::BadPoison => "gravemente envenenado",
+                        StatusCondition::Sleep => "dormido",
+                        StatusCondition::Freeze => "congelado",
+                    };
+
+                    self.logs.push(format!(
+                        "¡{} fue {} por {} de {}!",
+                        self.attacker_name,
+                        status_name,
+                        ability_id,
+                        self.defender_name
+                    ));
+                },
+
+                _ => {},
+            }
+        }
     }
 }
 

@@ -83,7 +83,7 @@ async fn main() {
     // Configurar dirección y puerto desde variables de entorno
     let bind_address = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "3000".to_string())
+        .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()
         .expect("PORT must be a valid number");
     

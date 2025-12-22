@@ -206,25 +206,7 @@ pub struct BattleState {
 }
 
 impl BattleState {
-    /// Crea un nuevo estado de batalla contra un Pokémon salvaje (formato Single)
-    pub fn new(player_active_index: usize, opponent_instance: PokemonInstance) -> Self {
-        Self {
-            format: BattleFormat::Single,
-            player_active_indices: vec![player_active_index],
-            opponent_instance,
-            is_trainer_battle: false,
-            opponent_team: Vec::new(),
-            opponent_active_indices: vec![0],
-            opponent_name: None,
-            turn_counter: 1,
-            log: Vec::new(),
-            weather: None,
-            terrain: None,
-            pending_player_actions: Vec::new(),
-        }
-    }
-
-    /// Crea un nuevo estado de batalla contra un entrenador
+    /// Crea un nuevo estado de batalla
     /// 
     /// # Parámetros
     /// - `player_active_index`: Índice del primer Pokémon del jugador
@@ -235,11 +217,12 @@ impl BattleState {
     /// # Nota
     /// Si el formato es Double, se espera que el jugador tenga al menos 2 Pokémon.
     /// Si solo tiene 1, se usará Single automáticamente.
-    pub fn new_trainer_battle(
+    pub fn new(
         player_active_index: usize,
         opponent_team: Vec<PokemonInstance>,
         opponent_name: String,
         format: BattleFormat,
+        is_trainer_battle: bool,
     ) -> Self {
         // Determinar los índices activos según el formato
         let (player_indices, opponent_indices) = match format {
@@ -280,7 +263,7 @@ impl BattleState {
             format: final_format,
             player_active_indices: final_player_indices,
             opponent_instance: opponent_team[0].clone(), // Para compatibilidad, usar el primero
-            is_trainer_battle: true,
+            is_trainer_battle,
             opponent_team,
             opponent_active_indices: final_opponent_indices,
             opponent_name: Some(opponent_name),
@@ -295,29 +278,21 @@ impl BattleState {
     /// Obtiene el Pokémon activo del oponente (primero en la lista de activos)
     /// Para compatibilidad con código existente que espera un solo Pokémon
     pub fn get_opponent_active(&self) -> &PokemonInstance {
-        if self.is_trainer_battle {
-            let index = self.opponent_active_indices.first().copied().unwrap_or(0);
-            &self.opponent_team[index]
-        } else {
-            &self.opponent_instance
-        }
+        let index = self.opponent_active_indices.first().copied().unwrap_or(0);
+        &self.opponent_team[index]
     }
 
     /// Obtiene una referencia mutable al Pokémon activo del oponente (primero en la lista de activos)
     /// Para compatibilidad con código existente que espera un solo Pokémon
     pub fn get_opponent_active_mut(&mut self) -> &mut PokemonInstance {
-        if self.is_trainer_battle {
-            let index = self.opponent_active_indices.first().copied().unwrap_or(0);
-            &mut self.opponent_team[index]
-        } else {
-            &mut self.opponent_instance
-        }
+        let index = self.opponent_active_indices.first().copied().unwrap_or(0);
+        &mut self.opponent_team[index]
     }
 
     /// Actualiza el opponent_instance para que coincida con el Pokémon activo actual
     /// Útil para mantener sincronización con el frontend
     pub fn sync_opponent_instance(&mut self) {
-        if self.is_trainer_battle && !self.opponent_team.is_empty() {
+        if !self.opponent_team.is_empty() {
             let index = self.opponent_active_indices.first().copied().unwrap_or(0);
             self.opponent_instance = self.opponent_team[index].clone();
         }
@@ -325,9 +300,6 @@ impl BattleState {
 
     /// Verifica si el oponente tiene más Pokémon disponibles
     pub fn has_more_opponents(&self) -> bool {
-        if !self.is_trainer_battle {
-            return false;
-        }
         // Buscar si hay algún Pokémon en el equipo que no esté debilitado
         self.opponent_team.iter().any(|p| p.current_hp > 0)
     }
@@ -336,10 +308,6 @@ impl BattleState {
     /// Retorna true si encontró un Pokémon disponible, false si no hay más
     /// IMPORTANTE: Solo cambia el índice si encuentra un Pokémon disponible
     pub fn switch_to_next_opponent(&mut self) -> bool {
-        if !self.is_trainer_battle {
-            return false;
-        }
-
         // Verificar primero si hay algún Pokémon disponible antes de cambiar
         let has_available = self.opponent_team.iter().any(|p| p.current_hp > 0);
         if !has_available {
