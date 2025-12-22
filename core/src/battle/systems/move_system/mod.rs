@@ -6,8 +6,12 @@
 //! - Aplicar efectos de movimientos
 //! - Gestionar PP
 
-// TODO: Fase 2 - Mover lógica de context.rs, targeting.rs, checks.rs aquí
-// - BattleContext (de context.rs)
-// - resolve_targets (de targeting.rs)
-// - initialize_move_pp, consume_move_pp, has_moves_with_pp (de checks.rs)
-// - create_struggle_move (de checks.rs)
+pub mod executor;
+pub mod targeting;
+
+// Re-exportar tipos y funciones principales
+pub use executor::BattleContext;
+pub use targeting::resolve_targets;
+
+// NOTA: initialize_move_pp, consume_move_pp, has_moves_with_pp, create_struggle_move
+// permanecen en checks.rs por ahora debido a compatibilidad de firmas
