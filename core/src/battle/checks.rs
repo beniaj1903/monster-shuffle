@@ -93,6 +93,7 @@ pub fn create_struggle_move() -> MoveData {
             max_hits: None,
             min_turns: None,
             max_turns: None,
+            makes_contact: true, // Struggle hace contacto
         },
         stat_changes: Vec::new(),
         target: "selected-pokemon".to_string(),

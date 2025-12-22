@@ -1,6 +1,23 @@
 //! Módulo de batalla - Sistema de combate Pokémon
-//! 
-//! Este módulo contiene toda la lógica de batalla dividida en submódulos:
+//!
+//! Este módulo contiene toda la lógica de batalla organizada en capas:
+//!
+//! ## Capa de Sistemas (systems/)
+//! - `action_system`: Recopilación, ordenamiento y ejecución de acciones
+//! - `ability_system`: Procesamiento de habilidades Pokémon
+//! - `damage_system`: Cálculo de daño y críticos
+//! - `move_system`: Ejecución de movimientos y targeting
+//! - `effect_system`: Efectos de campo, clima, terreno y estados
+//! - `ai_system`: Inteligencia artificial para oponentes
+//! - `validation_system`: Validaciones y checks
+//!
+//! ## Capa de Orquestación (orchestration/)
+//! - Motor principal que coordina todos los sistemas
+//!
+//! ## Capa de Infraestructura (infrastructure/)
+//! - Utilidades y helpers de soporte
+//!
+//! ## Módulos Legacy (en proceso de migración)
 //! - `context`: Contexto de batalla para procesar ataques individuales
 //! - `targeting`: Resolución de objetivos en combates Singles/Doubles
 //! - `mechanics`: Cálculos matemáticos (daño, críticos, efectividad)
@@ -8,12 +25,19 @@
 //! - `pipeline`: Orquestación del flujo de turnos
 //! - `checks`: Validaciones (PP, estados, grounded)
 
+// Nuevas capas (Arquitectura por Capas)
+pub mod systems;
+pub mod orchestration;
+pub mod infrastructure;
+
+// Módulos legacy (se migrarán gradualmente)
 pub mod context;
 pub mod targeting;
 pub mod mechanics;
 pub mod effects;
 pub mod pipeline;
 pub mod checks;
+pub mod ability_logic;
 
 #[cfg(test)]
 mod tests;
@@ -40,10 +64,8 @@ pub use checks::{
     has_moves_with_pp,
     create_struggle_move,
 };
-pub use pipeline::{
-    execute_turn,
-    execute_enemy_attack,
-};
+// Re-exportar execute_turn desde orchestration (que por ahora usa pipeline)
+pub use orchestration::execute_turn;
 
 use serde::{Deserialize, Serialize};
 
