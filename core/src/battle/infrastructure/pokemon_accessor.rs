@@ -20,7 +20,7 @@ use crate::game::{BattleState, PlayerTeam};
 pub fn get_pokemon<'a>(
     position: FieldPosition,
     team_index: usize,
-    battle_state: &'a BattleState,
+    _battle_state: &'a BattleState,
     player_team: &'a PlayerTeam,
     opponent_team: &'a Vec<PokemonInstance>,
 ) -> Option<&'a PokemonInstance> {
@@ -29,11 +29,9 @@ pub fn get_pokemon<'a>(
             player_team.active_members.get(team_index)
         }
         FieldPosition::OpponentLeft | FieldPosition::OpponentRight => {
-            if battle_state.is_trainer_battle {
-                opponent_team.get(team_index)
-            } else {
-                Some(&battle_state.opponent_instance)
-            }
+            // IMPORTANTE: Siempre usar opponent_team, no battle_state.opponent_instance
+            // El parámetro opponent_team es el que se pasa desde el handler y se sincroniza correctamente
+            opponent_team.get(team_index)
         }
     }
 }
@@ -52,7 +50,7 @@ pub fn get_pokemon<'a>(
 pub fn get_pokemon_mut<'a>(
     position: FieldPosition,
     team_index: usize,
-    battle_state: &'a mut BattleState,
+    _battle_state: &'a mut BattleState,
     player_team: &'a mut PlayerTeam,
     opponent_team: &'a mut Vec<PokemonInstance>,
 ) -> Option<&'a mut PokemonInstance> {
@@ -61,11 +59,9 @@ pub fn get_pokemon_mut<'a>(
             player_team.active_members.get_mut(team_index)
         }
         FieldPosition::OpponentLeft | FieldPosition::OpponentRight => {
-            if battle_state.is_trainer_battle {
-                opponent_team.get_mut(team_index)
-            } else {
-                Some(&mut battle_state.opponent_instance)
-            }
+            // IMPORTANTE: Siempre usar opponent_team, no battle_state.opponent_instance
+            // El parámetro opponent_team es el que se pasa desde el handler y se sincroniza correctamente
+            opponent_team.get_mut(team_index)
         }
     }
 }

@@ -65,7 +65,7 @@ pub fn execute_turn(
         move_pool,
         &mut result.logs,
     );
-    sort_candidates(&mut candidates, rng);
+    sort_candidates(&mut candidates, battle_state, rng);
 
     // 4. Fase de Ejecución (Bucle Principal)
     for candidate in candidates {
@@ -95,7 +95,9 @@ pub fn execute_turn(
 
         // Si hubo un knockout, verificar el resultado de la batalla
         if action_result.caused_knockout {
-            let outcome = check_battle_state(battle_state, player_team, &mut result.logs);
+            eprintln!("[BATTLE_END] Knockout detectado, verificando estado de batalla...");
+            let outcome = check_battle_state(battle_state, player_team, opponent_team, &mut result.logs);
+            eprintln!("[BATTLE_END] Resultado: {:?}", outcome);
             if outcome != BattleOutcome::Continue {
                 result.outcome = outcome;
                 return result;
@@ -112,7 +114,7 @@ pub fn execute_turn(
     );
 
     // 6. Determinar Resultado Final
-    result.outcome = check_battle_state(battle_state, player_team, &mut result.logs);
+    result.outcome = check_battle_state(battle_state, player_team, opponent_team, &mut result.logs);
 
     result
 }
@@ -146,6 +148,13 @@ fn execute_single_action(
 ) -> ActionResult {
     let mut result = ActionResult::new(candidate.is_player);
 
+    // Obtener el atacante para la resolución de targets (necesario para redirection)
+    let attacker = if candidate.is_player {
+        &player_team.active_members[candidate.team_index]
+    } else {
+        &opponent_team[candidate.team_index]
+    };
+
     // 1. Resolver Objetivos (Targets)
     let targets = resolve_targets(
         candidate.position,
@@ -153,6 +162,9 @@ fn execute_single_action(
         candidate.selected_target,
         battle_state,
         player_team,
+        opponent_team,
+        attacker,
+        &candidate.move_data,
         rng,
     );
 
@@ -312,15 +324,22 @@ fn process_move_hit(
 
     // Verificar si el defensor se debilitó
     if final_defender.current_hp == 0 && damage > 0 {
+        eprintln!("[BATTLE_END] Defensor {} debilitado (HP = 0)", final_defender.species.display_name);
         result.defender_fainted = true;
     }
 
     // Aplicar cambios de vuelta a los Pokémon originales
     if let Some(attacker) = get_pokemon_mut(candidate.position, attacker_index, battle_state, player_team, opponent_team) {
+        eprintln!("[BATTLE_END] Sincronizando atacante {} | HP del clon: {} | HP antes: {}",
+            final_attacker.species.display_name, final_attacker.current_hp, attacker.current_hp);
         *attacker = final_attacker.clone();
     }
     if let Some(defender) = get_pokemon_mut(target_pos, defender_index, battle_state, player_team, opponent_team) {
+        eprintln!("[BATTLE_END] Sincronizando defensor {} | HP del clon: {} | HP antes: {}",
+            final_defender.species.display_name, final_defender.current_hp, defender.current_hp);
         *defender = final_defender.clone();
+        eprintln!("[BATTLE_END] Sincronizando defensor {} | HP después de copiar: {}",
+            defender.species.display_name, defender.current_hp);
     }
 
     // Procesar items después de causar daño (Life Orb recoil)
@@ -335,6 +354,11 @@ fn process_move_hit(
             // Agregar logs del item
             result.logs.extend(item_result.logs);
         }
+    }
+
+    // Log final del HP del defensor antes de retornar
+    if let Some(defender) = get_pokemon_mut(target_pos, defender_index, battle_state, player_team, opponent_team) {
+        eprintln!("[BATTLE_END] HP FINAL del defensor {} antes de retornar: {}", defender.species.display_name, defender.current_hp);
     }
 
     result
@@ -428,7 +452,11 @@ fn collect_action_candidates(
 // MIGRADO: select_ai_move ahora está en systems/ai_system/selector.rs
 
 /// Ordena los candidatos por prioridad -> velocidad -> RNG
-fn sort_candidates(candidates: &mut Vec<ActionCandidate>, rng: &mut StdRng) {
+fn sort_candidates(
+    candidates: &mut Vec<ActionCandidate>,
+    battle_state: &BattleState,
+    rng: &mut StdRng,
+) {
     // Asignar un número aleatorio a cada candidato para desempatar
     let mut with_random: Vec<(ActionCandidate, u32)> = candidates
         .drain(..)
@@ -438,13 +466,24 @@ fn sort_candidates(candidates: &mut Vec<ActionCandidate>, rng: &mut StdRng) {
         })
         .collect();
 
-    // Ordenar por: prioridad (desc) -> velocidad (desc) -> random (asc)
+    // Determinar si Trick Room está activo
+    let trick_room_active = battle_state.trick_room_active;
+
+    // Ordenar por: prioridad (desc) -> velocidad (desc o asc según Trick Room) -> random (asc)
     with_random.sort_by(|a, b| {
-        // Primero por prioridad (mayor primero)
+        // Primero por prioridad (mayor primero) - SIEMPRE
         match b.0.priority.cmp(&a.0.priority) {
             std::cmp::Ordering::Equal => {
-                // Luego por velocidad (mayor primero)
-                match b.0.speed.cmp(&a.0.speed) {
+                // Luego por velocidad
+                // Si Trick Room está activo, invertir el orden (menor velocidad primero)
+                // Si NO está activo, orden normal (mayor velocidad primero)
+                let speed_ordering = if trick_room_active {
+                    a.0.speed.cmp(&b.0.speed) // Invertido: menor primero
+                } else {
+                    b.0.speed.cmp(&a.0.speed) // Normal: mayor primero
+                };
+
+                match speed_ordering {
                     std::cmp::Ordering::Equal => {
                         // Desempate aleatorio
                         a.1.cmp(&b.1)
@@ -546,6 +585,21 @@ fn handle_entry_hazards(
                             logs,
                         );
                     },
+                    AbilityEffect::Custom { ability_id: custom_id } => {
+                        if custom_id == "download" {
+                            // Download: Compara Defense vs Sp. Defense de los oponentes
+                            // y boosteaAtaque o Sp. Ataque según corresponda
+                            apply_download_boost(
+                                idx,
+                                true,
+                                battle_state,
+                                player_team,
+                                opponent_team,
+                                &pokemon_name,
+                                logs,
+                            );
+                        }
+                    },
                     _ => {},
                 }
             }
@@ -623,6 +677,21 @@ fn handle_entry_hazards(
                             &ability_name,
                             logs,
                         );
+                    },
+                    AbilityEffect::Custom { ability_id: custom_id } => {
+                        if custom_id == "download" {
+                            // Download: Compara Defense vs Sp. Defense de los oponentes
+                            // y boosteaAtaque o Sp. Ataque según corresponda
+                            apply_download_boost(
+                                idx,
+                                false,
+                                battle_state,
+                                player_team,
+                                opponent_team,
+                                &pokemon_name,
+                                logs,
+                            );
+                        }
                     },
                     _ => {},
                 }
@@ -713,6 +782,75 @@ fn apply_on_entry_stat_change(
             }
         },
         _ => {},
+    }
+}
+
+/// Aplica el boost de Download basado en las stats de los oponentes
+/// Download compara la Defense promedio vs Sp. Defense promedio de los oponentes
+/// y boostea Attack (+1) si Defense promedio es menor, o Sp. Attack (+1) si Sp. Defense es menor
+fn apply_download_boost(
+    user_idx: usize,
+    is_player: bool,
+    battle_state: &BattleState,
+    player_team: &mut PlayerTeam,
+    opponent_team: &mut Vec<PokemonInstance>,
+    pokemon_name: &str,
+    logs: &mut Vec<String>,
+) {
+    // Obtener las stats de los oponentes
+    let (total_def, total_spdef, count) = if is_player {
+        // Comparar con los oponentes
+        battle_state.opponent_active_indices.iter()
+            .filter_map(|&idx| opponent_team.get(idx))
+            .fold((0u32, 0u32, 0u32), |(def, spdef, cnt), opp| {
+                (
+                    def + opp.base_computed_stats.defense as u32,
+                    spdef + opp.base_computed_stats.special_defense as u32,
+                    cnt + 1,
+                )
+            })
+    } else {
+        // Comparar con los jugadores
+        battle_state.player_active_indices.iter()
+            .filter_map(|&idx| player_team.active_members.get(idx))
+            .fold((0u32, 0u32, 0u32), |(def, spdef, cnt), player| {
+                (
+                    def + player.base_computed_stats.defense as u32,
+                    spdef + player.base_computed_stats.special_defense as u32,
+                    cnt + 1,
+                )
+            })
+    };
+
+    // Si no hay oponentes, no hacer nada
+    if count == 0 {
+        return;
+    }
+
+    // Calcular promedios
+    let avg_def = total_def / count;
+    let avg_spdef = total_spdef / count;
+
+    // Determinar qué stat boostear
+    let (stat_to_boost, stat_name) = if avg_def < avg_spdef {
+        ("attack", "Attack")
+    } else {
+        ("special_attack", "Special Attack")
+    };
+
+    // Aplicar el boost
+    if is_player {
+        if let Some(player) = player_team.active_members.get_mut(user_idx) {
+            apply_stat_stage_change(player, stat_to_boost, 1);
+            logs.push(format!("{}'s Download!", pokemon_name));
+            logs.push(format!("{}'s {} rose!", pokemon_name, stat_name));
+        }
+    } else {
+        if let Some(opp) = opponent_team.get_mut(user_idx) {
+            apply_stat_stage_change(opp, stat_to_boost, 1);
+            logs.push(format!("{}'s Download!", pokemon_name));
+            logs.push(format!("{}'s {} rose!", pokemon_name, stat_name));
+        }
     }
 }
 
@@ -986,6 +1124,138 @@ fn process_end_of_turn_residuals(
             if pokemon.current_hp > 0 {
                 let item_result = ItemProcessor::process_end_of_turn(pokemon);
                 logs.extend(item_result.logs);
+            }
+        }
+    }
+
+    // 7. Procesar efectos volátiles avanzados (Leech Seed, Perish Song)
+    // Primero recolectar información sobre Leech Seed para curaciones
+    let mut leech_seed_heals: Vec<(String, u16)> = Vec::new(); // (source_id, heal_amount)
+
+    // Jugador
+    for &idx in &battle_state.player_active_indices.clone() {
+        if let Some(pokemon) = player_team.active_members.get_mut(idx) {
+            if pokemon.current_hp > 0 {
+                process_volatile_status_single(pokemon, logs, &mut leech_seed_heals);
+            }
+        }
+    }
+
+    // Oponente
+    for &idx in &battle_state.opponent_active_indices.clone() {
+        if let Some(pokemon) = opponent_team.get_mut(idx) {
+            if pokemon.current_hp > 0 {
+                process_volatile_status_single(pokemon, logs, &mut leech_seed_heals);
+            }
+        }
+    }
+
+    // Aplicar curaciones de Leech Seed
+    for (source_id, heal_amount) in leech_seed_heals {
+        // Buscar el source en player team
+        let mut healed = false;
+        for &idx in &battle_state.player_active_indices {
+            if let Some(source_pokemon) = player_team.active_members.get_mut(idx) {
+                if source_pokemon.id == source_id && source_pokemon.current_hp > 0 {
+                    let max_hp = source_pokemon.base_computed_stats.hp;
+                    source_pokemon.current_hp = (source_pokemon.current_hp + heal_amount).min(max_hp);
+                    logs.push(format!(
+                        "¡{} absorbe {} HP!",
+                        source_pokemon.species.display_name,
+                        heal_amount
+                    ));
+                    healed = true;
+                    break;
+                }
+            }
+        }
+
+        // Si no se encontró, buscar en opponent team
+        if !healed {
+            for &idx in &battle_state.opponent_active_indices {
+                if let Some(source_pokemon) = opponent_team.get_mut(idx) {
+                    if source_pokemon.id == source_id && source_pokemon.current_hp > 0 {
+                        let max_hp = source_pokemon.base_computed_stats.hp;
+                        source_pokemon.current_hp = (source_pokemon.current_hp + heal_amount).min(max_hp);
+                        logs.push(format!(
+                            "¡{} absorbe {} HP!",
+                            source_pokemon.species.display_name,
+                            heal_amount
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 8. Decrementar contador de Trick Room
+    if battle_state.trick_room_active && battle_state.trick_room_turns_left > 0 {
+        battle_state.trick_room_turns_left -= 1;
+
+        if battle_state.trick_room_turns_left == 0 {
+            battle_state.trick_room_active = false;
+            logs.push("¡Las dimensiones retornaron a la normalidad!".to_string());
+        } else {
+            logs.push(format!(
+                "Trick Room activo ({} turnos restantes)",
+                battle_state.trick_room_turns_left
+            ));
+        }
+    }
+
+    // 9. Limpiar efectos de redirección al final del turno
+    use crate::battle::systems::redirection_system::clear_redirection;
+    clear_redirection(battle_state);
+}
+
+/// Procesa efectos de status volátiles para un solo Pokémon
+/// - Leech Seed: Daño al afectado, registra curación para el origen
+/// - Perish Song: Decrementar contador y KO si llega a 0
+fn process_volatile_status_single(
+    pokemon: &mut PokemonInstance,
+    logs: &mut Vec<String>,
+    leech_seed_heals: &mut Vec<(String, u16)>,
+) {
+    if let Some(ref mut volatile) = pokemon.volatile_status {
+        // Leech Seed: Pierde 1/8 HP y registra curación para el source
+        if volatile.leech_seeded {
+            let max_hp = pokemon.base_computed_stats.hp;
+            let damage = max_hp / 8;
+            let old_hp = pokemon.current_hp;
+            pokemon.current_hp = pokemon.current_hp.saturating_sub(damage);
+            let actual_damage = old_hp - pokemon.current_hp;
+
+            logs.push(format!(
+                "¡{} pierde {} HP por Leech Seed!",
+                pokemon.species.display_name,
+                actual_damage
+            ));
+
+            // Registrar curación para el source
+            if let Some(ref source_id) = volatile.leech_seed_source {
+                leech_seed_heals.push((source_id.clone(), actual_damage));
+            }
+        }
+
+        // Perish Song: Decrementar contador
+        if let Some(ref mut count) = volatile.perish_count {
+            if *count > 0 {
+                *count -= 1;
+                logs.push(format!(
+                    "¡El contador de Perish Song de {} es {}!",
+                    pokemon.species.display_name,
+                    count
+                ));
+
+                // Si llega a 0, debilitar al Pokémon
+                if *count == 0 {
+                    pokemon.current_hp = 0;
+                    logs.push(format!(
+                        "¡{} fue debilitado por Perish Song!",
+                        pokemon.species.display_name
+                    ));
+                }
             }
         }
     }

@@ -49,7 +49,6 @@ impl<'a> BattleContext<'a> {
     /// Paso 1: Chequeo de Estado (Dormido, Congelado, Flinch, Paralysis, Recarga, Carga)
     /// Retorna true si el atacante puede ejecutar el movimiento
     pub fn can_execute_move(&mut self) -> bool {
-        eprintln!("[DEBUG] BattleContext::can_execute_move: Verificando si {} puede ejecutar {}", self.attacker_name, self.move_data.name);
         // Check de Flinch
         if let Some(ref mut volatile) = self.attacker.volatile_status {
             if volatile.flinched {
@@ -117,7 +116,6 @@ impl<'a> BattleContext<'a> {
         }
 
         // Puede moverse: añadir log del movimiento
-        eprintln!("[DEBUG] BattleContext::can_execute_move: {} puede ejecutar {}", self.attacker_name, self.move_data.name);
         self.logs.push(format!("{} usó {}", self.attacker_name, self.move_data.name));
         true
     }
@@ -125,9 +123,6 @@ impl<'a> BattleContext<'a> {
     /// Paso 2: Cálculo de Daño (Críticos, Multi-hit, Multipliers)
     /// Retorna el daño total infligido (0 si falló)
     pub fn calculate_damage(&mut self) -> u16 {
-        eprintln!("[DEBUG] BattleContext::calculate_damage: Calculando daño de {} contra {}", self.attacker_name, self.defender_name);
-        eprintln!("[DEBUG] BattleContext::calculate_damage: Movimiento: {} (poder: {:?}, tipo: {})", 
-            self.move_data.name, self.move_data.power, self.move_data.r#type);
         // Check de Protección (Protect/Detect)
         if let Some(ref volatile) = self.defender.volatile_status {
             if volatile.protected {
@@ -137,6 +132,13 @@ impl<'a> BattleContext<'a> {
                 ));
                 return 0; // No hace daño y evita efectos secundarios
             }
+        }
+
+        // Check de Protecciones Avanzadas (Wide Guard, Quick Guard, Mat Block, Crafty Shield)
+        use super::super::protection_system::check_advanced_protections;
+        if let Some(protection_msg) = check_advanced_protections(self.defender, self.move_data) {
+            self.logs.push(protection_msg);
+            return 0; // No hace daño y evita efectos secundarios
         }
         
         // Cálculo de número de golpes (Multi-Hit)
@@ -196,9 +198,11 @@ impl<'a> BattleContext<'a> {
             total_damage += damage;
             hit_successfully = true;
 
+            // Aplicar el daño al defensor
+            self.defender.current_hp = self.defender.current_hp.saturating_sub(damage);
+
             // Si el defensor se debilita, terminar el bucle
-            if damage >= self.defender.current_hp {
-                self.defender.current_hp = 0;
+            if self.defender.current_hp == 0 {
                 break;
             }
         }
@@ -241,6 +245,24 @@ impl<'a> BattleContext<'a> {
             }
         }
 
+        // Si el defensor tiene protecciones avanzadas activas, no aplicar efectos
+        use super::super::protection_system::check_advanced_protections;
+        if check_advanced_protections(self.defender, self.move_data).is_some() {
+            // Ya se mostró el mensaje de protección en calculate_damage
+            // No aplicar efectos secundarios
+            return;
+        }
+
+        // Verificar si Sheer Force está activo
+        // Sheer Force elimina efectos secundarios (ailments, stat changes, flinch)
+        // pero NO afecta recoil, drain, o healing
+        let has_sheer_force = self.attacker.ability == "sheer-force";
+        let has_secondary_effects = self.move_data.meta.ailment_chance > 0
+            || self.move_data.meta.flinch_chance > 0
+            || self.move_data.meta.stat_chance > 0
+            || !self.move_data.stat_changes.is_empty();
+        let sheer_force_active = has_sheer_force && has_secondary_effects;
+
         // Procesar Weakness Policy (si recibió golpe super efectivo)
         if damage_dealt > 0 && self.move_data.power.is_some() {
             use super::super::damage_system::calculator::{parse_type, get_type_effectiveness};
@@ -279,7 +301,8 @@ impl<'a> BattleContext<'a> {
         }
 
         // Aplicar cambios de stats
-        if !self.move_data.stat_changes.is_empty() {
+        // Sheer Force elimina stat changes si el movimiento causa daño
+        if !self.move_data.stat_changes.is_empty() && !sheer_force_active {
             let stat_chance = if self.move_data.meta.stat_chance == 0 {
                 100
             } else {
@@ -384,7 +407,8 @@ impl<'a> BattleContext<'a> {
         }
 
         // Aplicar estados alterados (ailments)
-        if self.move_data.meta.ailment != "none" {
+        // Sheer Force elimina ailments
+        if self.move_data.meta.ailment != "none" && !sheer_force_active {
             // Verificar efectos de terreno antes de aplicar estados
             let terrain_blocks_ailment = if let Some(terrain_state) = self.terrain {
                 match terrain_state.terrain_type {
@@ -496,7 +520,8 @@ impl<'a> BattleContext<'a> {
         }
 
         // Aplicar Flinch
-        if self.move_data.meta.flinch_chance > 0 {
+        // Sheer Force elimina flinch
+        if self.move_data.meta.flinch_chance > 0 && !sheer_force_active {
             let roll = self.rng.gen_range(0..=100);
             if roll <= self.move_data.meta.flinch_chance as u32 {
                 if self.defender.volatile_status.is_none() {
@@ -509,6 +534,21 @@ impl<'a> BattleContext<'a> {
                         self.defender.species.display_name
                     ));
                 }
+            }
+        }
+
+        // Aplicar Switch Forzado (Dragon Tail, Roar, etc.)
+        // Solo se aplica si el movimiento golpeó y causó daño
+        if self.move_data.meta.forces_switch && damage_dealt > 0 && self.defender.current_hp > 0 {
+            if self.defender.volatile_status.is_none() {
+                self.defender.init_battle_stages();
+            }
+            if let Some(ref mut volatile) = self.defender.volatile_status {
+                volatile.forced_switch = true;
+                self.logs.push(format!(
+                    "¡{} será forzado a cambiar!",
+                    self.defender.species.display_name
+                ));
             }
         }
 
@@ -660,9 +700,11 @@ impl<'a> BattleContext<'a> {
         }
 
         // Hook: Aplicar habilidades OnContact del defensor (Rough Skin, Static, Iron Barbs, etc.)
+        // Y items de contacto (Rocky Helmet)
         // Solo se activan si el movimiento hizo contacto y causó daño
         if self.move_data.meta.makes_contact && damage_dealt > 0 && self.attacker.current_hp > 0 {
             self.apply_on_contact_abilities();
+            self.apply_on_contact_items();
         }
     }
     
@@ -797,6 +839,27 @@ impl<'a> BattleContext<'a> {
                 },
 
                 _ => {},
+            }
+        }
+    }
+
+    /// Aplica efectos de items del defensor que se activan al recibir contacto
+    /// (Rocky Helmet)
+    fn apply_on_contact_items(&mut self) {
+        // Rocky Helmet: 1/6 del HP máximo del atacante como daño
+        if let Some(ref item_id) = self.defender.held_item {
+            if item_id == "rocky-helmet" {
+                let damage = (self.attacker.base_computed_stats.hp as f32 / 6.0) as u16;
+                let actual_damage = damage.min(self.attacker.current_hp);
+
+                if actual_damage > 0 {
+                    self.attacker.current_hp = self.attacker.current_hp.saturating_sub(actual_damage);
+                    self.logs.push(format!(
+                        "¡{} fue herido por el Rocky Helmet de {}!",
+                        self.attacker_name,
+                        self.defender_name
+                    ));
+                }
             }
         }
     }

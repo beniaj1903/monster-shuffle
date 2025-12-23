@@ -37,8 +37,10 @@ pub fn determine_player_outcome(player_team: &PlayerTeam, battle_state: &BattleS
 /// Si hay más enemigos, cambia al siguiente y retorna EnemySwitched.
 /// Si no hay más, retorna PlayerWon.
 pub fn determine_enemy_outcome(battle_state: &mut BattleState, logs: &mut Vec<String>) -> BattleOutcome {
+    eprintln!("[BATTLE_END] determine_enemy_outcome - Verificando si hay más oponentes...");
     // Buscar si hay otro Pokémon enemigo disponible
     if battle_state.switch_to_next_opponent() {
+        eprintln!("[BATTLE_END] Se encontró otro oponente, cambiando...");
         // El enemigo cambió de Pokémon
         let next_opponent = battle_state.get_opponent_active().clone();
         let opponent_name = battle_state.opponent_name.clone().unwrap_or_else(|| "El entrenador".to_string());
@@ -49,6 +51,7 @@ pub fn determine_enemy_outcome(battle_state: &mut BattleState, logs: &mut Vec<St
         ));
         BattleOutcome::EnemySwitched
     } else {
+        eprintln!("[BATTLE_END] No hay más oponentes, jugador ganó!");
         // No hay más Pokémon enemigos con vida
         BattleOutcome::PlayerWon
     }
@@ -60,24 +63,32 @@ pub fn determine_enemy_outcome(battle_state: &mut BattleState, logs: &mut Vec<St
 pub fn check_battle_state(
     battle_state: &mut BattleState,
     player_team: &PlayerTeam,
+    opponent_team: &Vec<crate::models::PokemonInstance>,
     logs: &mut Vec<String>,
 ) -> BattleOutcome {
+    eprintln!("[BATTLE_END] check_battle_state - Verificando estado de batalla");
+
     // Verificar si todos los Pokémon activos del jugador están debilitados
     let all_player_active_fainted = battle_state.player_active_indices.iter().all(|&idx| {
-        player_team.active_members.get(idx).map(|p| p.current_hp == 0).unwrap_or(true)
+        let hp = player_team.active_members.get(idx).map(|p| p.current_hp).unwrap_or(0);
+        eprintln!("[BATTLE_END] Jugador índice {}: HP = {}", idx, hp);
+        hp == 0
     });
+    eprintln!("[BATTLE_END] Todos los jugadores debilitados: {}", all_player_active_fainted);
 
     // Verificar si todos los Pokémon activos del oponente están debilitados
-    let all_opponent_active_fainted = if battle_state.is_trainer_battle {
-        battle_state.opponent_active_indices.iter().all(|&idx| {
-            battle_state.opponent_team.get(idx).map(|p| p.current_hp == 0).unwrap_or(true)
-        })
-    } else {
-        battle_state.opponent_instance.current_hp == 0
-    };
+    // IMPORTANTE: Usar el opponent_team del parámetro, NO battle_state.opponent_team
+    // porque el parámetro es el que se modifica durante execute_turn
+    let all_opponent_active_fainted = battle_state.opponent_active_indices.iter().all(|&idx| {
+        let hp = opponent_team.get(idx).map(|p| p.current_hp).unwrap_or(0);
+        eprintln!("[BATTLE_END] Oponente índice {}: HP = {}", idx, hp);
+        hp == 0
+    });
+    eprintln!("[BATTLE_END] Todos los oponentes debilitados: {}", all_opponent_active_fainted);
 
     // Si todos los oponentes activos están debilitados
     if all_opponent_active_fainted {
+        eprintln!("[BATTLE_END] Todos los oponentes están debilitados, determinando resultado...");
         // Intentar cambiar a un nuevo oponente
         return determine_enemy_outcome(battle_state, logs);
     }

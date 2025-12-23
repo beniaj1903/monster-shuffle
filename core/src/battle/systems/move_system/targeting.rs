@@ -1,21 +1,25 @@
 use rand::rngs::StdRng;
 use rand::Rng;
-use crate::models::FieldPosition;
+use crate::models::{FieldPosition, MoveData, PokemonInstance};
 use crate::game::{BattleState, PlayerTeam};
+use super::super::redirection_system::apply_redirection;
 
 /// Resuelve los objetivos de un movimiento basándose en el tipo de objetivo y la posición del usuario
-/// 
+///
 /// Esta función determina a quién golpea un movimiento en combates dobles (VGC).
 /// Retorna un vector de posiciones en el campo que serán afectadas por el movimiento.
-/// 
+///
 /// # Parámetros
 /// - `user_pos`: La posición del Pokémon que usa el movimiento
 /// - `move_target_type`: El tipo de objetivo del movimiento (ej: "selected-pokemon", "all-opponents")
 /// - `selected_target`: El objetivo seleccionado por el usuario (si aplica)
 /// - `battle_state`: El estado de batalla para verificar qué posiciones están ocupadas por Pokémon vivos
 /// - `player_team`: El equipo del jugador para verificar qué Pokémon están vivos
+/// - `opponent_team`: El equipo del oponente para verificar qué Pokémon están vivos (datos actuales durante execute_turn)
+/// - `attacker`: El Pokémon que usa el movimiento (para redirection)
+/// - `move_data`: Los datos del movimiento (para redirection)
 /// - `rng`: Generador de números aleatorios para objetivos aleatorios
-/// 
+///
 /// # Retorna
 /// Un vector de posiciones en el campo que serán afectadas por el movimiento
 pub fn resolve_targets(
@@ -24,39 +28,38 @@ pub fn resolve_targets(
     selected_target: Option<FieldPosition>,
     battle_state: &BattleState,
     player_team: &PlayerTeam,
+    opponent_team: &Vec<PokemonInstance>,
+    attacker: &PokemonInstance,
+    move_data: &MoveData,
     rng: &mut StdRng,
 ) -> Vec<FieldPosition> {
-    eprintln!("[DEBUG] resolve_targets: user_pos={:?}, move_target_type={}, selected_target={:?}, battle_format={:?}", 
+    eprintln!("[TARGET] resolve_targets: user_pos={:?}, move_target_type={}, selected_target={:?}, format={:?}",
         user_pos, move_target_type, selected_target, battle_state.format);
-    
+
     match move_target_type {
         // PRIORIDAD ABSOLUTA: El usuario mismo (ej: Swords Dance, Calm Mind)
         // IGNORA completamente selected_target del frontend
         "user" => {
-            eprintln!("[DEBUG] resolve_targets: target='user' - Ignorando selected_target, retornando user_pos: {:?}", user_pos);
             vec![user_pos]
         }
         
         // PRIORIDAD ABSOLUTA: Un oponente aleatorio (ej: Outrage, Thrash, Petal Dance)
         // IGNORA selected_target, selecciona aleatoriamente
         "random-opponent" => {
-            eprintln!("[DEBUG] resolve_targets: target='random-opponent' - Ignorando selected_target, seleccionando aleatoriamente");
             let mut available_opponents = Vec::new();
-            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team, opponent_team) {
                 available_opponents.push(FieldPosition::OpponentLeft);
             }
-            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team, opponent_team) {
                 available_opponents.push(FieldPosition::OpponentRight);
             }
             
             if available_opponents.is_empty() {
-                eprintln!("[DEBUG] resolve_targets: No hay oponentes vivos disponibles");
                 vec![]
             } else {
                 // Seleccionar un oponente aleatorio
                 let index = rng.gen_range(0..available_opponents.len());
                 let selected = available_opponents[index];
-                eprintln!("[DEBUG] resolve_targets: Oponente aleatorio seleccionado: {:?}", selected);
                 vec![selected]
             }
         }
@@ -64,85 +67,73 @@ pub fn resolve_targets(
         // Todos los oponentes (ej: Rock Slide, Surf)
         // IGNORA selected_target
         "all-opponents" => {
-            eprintln!("[DEBUG] resolve_targets: target='all-opponents' - Ignorando selected_target");
             let mut targets = Vec::new();
             // Agregar posiciones de oponentes que estén vivas
-            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::OpponentLeft);
             }
-            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::OpponentRight);
             }
-            eprintln!("[DEBUG] resolve_targets: Objetivos 'all-opponents': {:?}", targets);
             targets
         }
         
         // Todos los otros Pokémon (ej: Earthquake, Explosion)
         // IGNORA selected_target
         "all-other-pokemon" => {
-            eprintln!("[DEBUG] resolve_targets: target='all-other-pokemon' - Ignorando selected_target");
             let mut targets = Vec::new();
             // Agregar todos los oponentes
-            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::OpponentLeft);
             }
-            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::OpponentRight);
             }
             // Agregar el aliado del usuario (si existe y está vivo)
             if let Some(ally_pos) = get_ally_position(user_pos) {
-                if is_position_alive(ally_pos, battle_state, player_team) {
+                if is_position_alive(ally_pos, battle_state, player_team, opponent_team) {
                     targets.push(ally_pos);
                 }
             }
-            eprintln!("[DEBUG] resolve_targets: Objetivos 'all-other-pokemon': {:?}", targets);
             targets
         }
         
         // Campo del usuario (ej: Light Screen, Reflect)
         // IGNORA selected_target
         "users-field" => {
-            eprintln!("[DEBUG] resolve_targets: target='users-field' - Ignorando selected_target");
             let mut targets = Vec::new();
-            if is_position_alive(FieldPosition::PlayerLeft, battle_state, player_team) {
+            if is_position_alive(FieldPosition::PlayerLeft, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::PlayerLeft);
             }
-            if is_position_alive(FieldPosition::PlayerRight, battle_state, player_team) {
+            if is_position_alive(FieldPosition::PlayerRight, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::PlayerRight);
             }
-            eprintln!("[DEBUG] resolve_targets: Objetivos 'users-field': {:?}", targets);
             targets
         }
         
         // Campo del oponente (ej: Stealth Rock, Spikes)
         // IGNORA selected_target
         "opponents-field" => {
-            eprintln!("[DEBUG] resolve_targets: target='opponents-field' - Ignorando selected_target");
             let mut targets = Vec::new();
-            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentLeft, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::OpponentLeft);
             }
-            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team) {
+            if is_position_alive(FieldPosition::OpponentRight, battle_state, player_team, opponent_team) {
                 targets.push(FieldPosition::OpponentRight);
             }
-            eprintln!("[DEBUG] resolve_targets: Objetivos 'opponents-field': {:?}", targets);
             targets
         }
         
         // El aliado del usuario (ej: Helping Hand, Follow Me)
         // IGNORA selected_target
         "ally" => {
-            eprintln!("[DEBUG] resolve_targets: target='ally' - Ignorando selected_target");
             if let Some(ally_pos) = get_ally_position(user_pos) {
-                if is_position_alive(ally_pos, battle_state, player_team) {
-                    eprintln!("[DEBUG] resolve_targets: Aliado encontrado: {:?}", ally_pos);
+                if is_position_alive(ally_pos, battle_state, player_team, opponent_team) {
                     vec![ally_pos]
                 } else {
-                    eprintln!("[DEBUG] resolve_targets: Aliado no está vivo");
                     vec![]
                 }
             } else {
-                eprintln!("[DEBUG] resolve_targets: No hay aliado disponible (formato Single)");
                 vec![]
             }
         }
@@ -151,15 +142,33 @@ pub fn resolve_targets(
         // AQUÍ SÍ usa selected_target, pero con validación robusta
         "selected-pokemon" => {
             if let Some(target) = selected_target {
-                eprintln!("[DEBUG] resolve_targets: target='selected-pokemon' - Usando selected_target: {:?}", target);
+                eprintln!("[TARGET] selected-pokemon: target seleccionado = {:?}", target);
                 // Validar que el objetivo esté vivo
-                if is_position_alive(target, battle_state, player_team) {
-                    vec![target]
+                let is_alive = is_position_alive(target, battle_state, player_team, opponent_team);
+                eprintln!("[TARGET] selected-pokemon: target {:?} está vivo = {}", target, is_alive);
+
+                if is_alive {
+                    // Aplicar redirección si está activa
+                    let final_target = if let Some(redirected) = apply_redirection(
+                        target,
+                        user_pos,
+                        attacker,
+                        move_data,
+                        battle_state,
+                    ) {
+                        eprintln!("[TARGET] selected-pokemon: redirección aplicada {:?} -> {:?}", target, redirected);
+                        redirected
+                    } else {
+                        target
+                    };
+                    eprintln!("[TARGET] selected-pokemon: objetivo final = {:?}", final_target);
+                    vec![final_target]
                 } else {
-                    eprintln!("[DEBUG] resolve_targets: WARNING - selected_target {:?} no está vivo, retornando vacío", target);
+                    eprintln!("[TARGET] selected-pokemon: target {:?} NO está vivo, retornando vacío", target);
                     vec![]
                 }
             } else {
+                eprintln!("[TARGET] selected-pokemon: NO hay target seleccionado, usando default");
                 // Si no hay objetivo seleccionado, usar lógica por defecto según el formato
                 use crate::models::BattleFormat;
                 match battle_state.format {
@@ -171,18 +180,15 @@ pub fn resolve_targets(
                         } else {
                             FieldPosition::PlayerLeft
                         };
-                        eprintln!("[DEBUG] resolve_targets: selected-pokemon sin target explícito en Single, usando default: {:?}", default_target);
                         // Validar que el objetivo por defecto esté vivo
-                        if is_position_alive(default_target, battle_state, player_team) {
+                        if is_position_alive(default_target, battle_state, player_team, opponent_team) {
                             vec![default_target]
                         } else {
-                            eprintln!("[DEBUG] resolve_targets: WARNING - default_target {:?} no está vivo, retornando vacío", default_target);
                             vec![]
                         }
                     }
                     BattleFormat::Double => {
                         // En Double, se requiere un objetivo explícito
-                        eprintln!("[DEBUG] resolve_targets: ERROR - selected-pokemon requiere target explícito en Double, retornando vacío");
                         vec![]
                     }
                 }
@@ -191,16 +197,13 @@ pub fn resolve_targets(
         
         // Por defecto, si no se reconoce el tipo, intentar usar selected_target o retornar vacío
         _ => {
-            eprintln!("[DEBUG] resolve_targets: WARNING - Tipo de target desconocido: '{}', intentando usar selected_target", move_target_type);
             if let Some(target) = selected_target {
-                if is_position_alive(target, battle_state, player_team) {
+                if is_position_alive(target, battle_state, player_team, opponent_team) {
                     vec![target]
                 } else {
-                    eprintln!("[DEBUG] resolve_targets: WARNING - selected_target {:?} no está vivo", target);
                     vec![]
                 }
             } else {
-                eprintln!("[DEBUG] resolve_targets: ERROR - Tipo desconocido y sin selected_target, retornando vacío");
                 vec![]
             }
         }
@@ -224,6 +227,7 @@ fn is_position_alive(
     position: FieldPosition,
     battle_state: &BattleState,
     player_team: &PlayerTeam,
+    opponent_team: &Vec<PokemonInstance>,
 ) -> bool {
     use crate::models::BattleFormat;
     match position {
@@ -265,23 +269,38 @@ fn is_position_alive(
                 // En formato Single, solo hay un oponente activo
                 if battle_state.format == BattleFormat::Single {
                     if let Some(&index) = battle_state.opponent_active_indices.first() {
-                        index < battle_state.opponent_team.len() 
-                            && battle_state.opponent_team[index].current_hp > 0
+                        let hp = opponent_team.get(index).map(|p| p.current_hp).unwrap_or(0);
+                        eprintln!("[TARGET] is_position_alive OpponentLeft (trainer/single): index={}, HP={}", index, hp);
+                        index < opponent_team.len()
+                            && opponent_team[index].current_hp > 0
                     } else {
+                        eprintln!("[TARGET] is_position_alive OpponentLeft (trainer/single): NO index");
                         false
                     }
                 } else {
                     // En formato Double, OpponentLeft es el primer índice
                     if let Some(&index) = battle_state.opponent_active_indices.first() {
-                        index < battle_state.opponent_team.len() 
-                            && battle_state.opponent_team[index].current_hp > 0
+                        let hp = opponent_team.get(index).map(|p| p.current_hp).unwrap_or(0);
+                        eprintln!("[TARGET] is_position_alive OpponentLeft (trainer/double): index={}, HP={}", index, hp);
+                        index < opponent_team.len()
+                            && opponent_team[index].current_hp > 0
                     } else {
+                        eprintln!("[TARGET] is_position_alive OpponentLeft (trainer/double): NO index");
                         false
                     }
                 }
             } else {
                 // Batalla salvaje - solo hay un oponente
-                battle_state.opponent_instance.current_hp > 0
+                // IMPORTANTE: Usar opponent_team del parámetro, no battle_state.opponent_team
+                if let Some(&index) = battle_state.opponent_active_indices.first() {
+                    let hp = opponent_team.get(index).map(|p| p.current_hp).unwrap_or(0);
+                    eprintln!("[TARGET] is_position_alive OpponentLeft (wild): index={}, HP={}", index, hp);
+                    index < opponent_team.len()
+                        && opponent_team[index].current_hp > 0
+                } else {
+                    eprintln!("[TARGET] is_position_alive OpponentLeft (wild): NO index");
+                    false
+                }
             }
         }
         FieldPosition::OpponentRight => {
@@ -291,8 +310,8 @@ fn is_position_alive(
             } else if battle_state.is_trainer_battle {
                 // En formato Double, OpponentRight es el segundo índice
                 if let Some(&index) = battle_state.opponent_active_indices.get(1) {
-                    index < battle_state.opponent_team.len() 
-                        && battle_state.opponent_team[index].current_hp > 0
+                    index < opponent_team.len()
+                        && opponent_team[index].current_hp > 0
                 } else {
                     false
                 }

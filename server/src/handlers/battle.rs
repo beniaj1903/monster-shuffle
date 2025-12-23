@@ -47,81 +47,56 @@ pub async fn submit_move(
     State(state): State<AppState>,
     Json(payload): Json<SubmitMoveRequest>,
 ) -> Result<Json<SubmitMoveResponse>, StatusCode> {
-    eprintln!("[DEBUG] submit_move: ===== INICIO submit_move =====");
-    eprintln!("[DEBUG] submit_move: Payload recibido completo: {:?}", payload);
-    eprintln!("[DEBUG] submit_move: session_id: {}", payload.session_id);
-    eprintln!("[DEBUG] submit_move: move_id: {}", payload.move_id);
-    eprintln!("[DEBUG] submit_move: user_index: {}", payload.user_index);
-    eprintln!("[DEBUG] submit_move: target_position: {:?}", payload.target_position);
     
     // Buscar la sesión
     let mut session = match state.sessions.get(&payload.session_id) {
         Some(s) => {
-            eprintln!("[DEBUG] submit_move: Sesión encontrada");
             s.clone()
         }
         None => {
-            eprintln!("[DEBUG] submit_move: ERROR - Sesión no encontrada: {}", payload.session_id);
             return Err(StatusCode::NOT_FOUND);
         }
     };
     
-    eprintln!("[DEBUG] submit_move: Sesión estado: {:?}", session.state);
 
     // Validar que esté en estado de batalla (normal o gimnasio)
     if session.state != GameState::Battle && session.state != GameState::GymBattle {
-        eprintln!("[DEBUG] submit_move: ERROR - Estado inválido: {:?} (esperado Battle o GymBattle)", session.state);
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Obtener el estado de batalla (clonar para poder modificarlo)
     let mut battle_state = match session.battle.clone() {
         Some(bs) => {
-            eprintln!("[DEBUG] submit_move: BattleState encontrado");
             bs
         }
         None => {
-            eprintln!("[DEBUG] submit_move: ERROR - No hay BattleState en la sesión");
             return Err(StatusCode::BAD_REQUEST);
         }
     };
     
-    eprintln!("[DEBUG] submit_move: player_active_indices: {:?}", battle_state.player_active_indices);
-    eprintln!("[DEBUG] submit_move: player_active_indices.len(): {}", battle_state.player_active_indices.len());
 
     // Validar que user_index corresponde a un Pokémon activo
     if payload.user_index >= battle_state.player_active_indices.len() {
-        eprintln!("[DEBUG] submit_move: ERROR - user_index ({}) >= player_active_indices.len() ({})", 
-            payload.user_index, battle_state.player_active_indices.len());
         return Err(StatusCode::BAD_REQUEST);
     }
-    
+
     let player_active_index = battle_state.player_active_indices[payload.user_index];
-    eprintln!("[DEBUG] submit_move: player_active_index (del array): {}", player_active_index);
-    eprintln!("[DEBUG] submit_move: session.team.active_members.len(): {}", session.team.active_members.len());
-    
+
     if player_active_index >= session.team.active_members.len() {
-        eprintln!("[DEBUG] submit_move: ERROR - player_active_index ({}) >= active_members.len() ({})", 
-            player_active_index, session.team.active_members.len());
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Validación: Verificar que el Pokémon activo no esté debilitado
     let player_hp = session.team.active_members[player_active_index].current_hp;
-    eprintln!("[DEBUG] submit_move: HP del Pokémon activo: {}", player_hp);
     if player_hp == 0 {
-        eprintln!("[DEBUG] submit_move: ERROR - Pokémon activo está debilitado (HP = 0)");
         return Err(StatusCode::BAD_REQUEST);
     }
 
     let player_mon = &session.team.active_members[player_active_index];
-    eprintln!("[DEBUG] submit_move: Pokémon activo: {} (HP: {})", player_mon.species.display_name, player_mon.current_hp);
     
     // Verificar si el movimiento existe y tiene PP disponible
     let player_has_pp = has_moves_with_pp(player_mon);
-    eprintln!("[DEBUG] submit_move: ¿Tiene movimientos con PP?: {}", player_has_pp);
     let move_id = if !player_has_pp {
-        eprintln!("[DEBUG] submit_move: Sin PP disponible, forzando Struggle");
         "struggle".to_string()
     } else {
         // Verificar que el movimiento existe en los movimientos aprendidos
@@ -130,21 +105,17 @@ pub async fn submit_move(
             .find(|m| m.move_id == payload.move_id);
         
         if let Some(learned_move) = found_move {
-            eprintln!("[DEBUG] submit_move: Movimiento {} encontrado, PP: {}/{}", payload.move_id, learned_move.current_pp, learned_move.max_pp);
             // Verificar PP
             if learned_move.current_pp == 0 {
-                eprintln!("[DEBUG] submit_move: Movimiento sin PP, forzando Struggle");
                 "struggle".to_string()
             } else {
                 payload.move_id.clone()
             }
         } else {
-            eprintln!("[DEBUG] submit_move: Movimiento {} no encontrado en movimientos aprendidos, forzando Struggle", payload.move_id);
             // Movimiento no encontrado, usar Struggle
             "struggle".to_string()
         }
     };
-    eprintln!("[DEBUG] submit_move: Movimiento final a usar: {}", move_id);
 
     // Crear la acción pendiente
     let action = PendingPlayerAction {
@@ -157,22 +128,14 @@ pub async fn submit_move(
     // Si ya existe una acción para este user_index, reemplazarla
     battle_state.pending_player_actions.retain(|a| a.user_index != payload.user_index);
     battle_state.pending_player_actions.push(action);
-    
-    eprintln!("[DEBUG] submit_move: Acciones pendientes después de agregar: {}", battle_state.pending_player_actions.len());
-    for (i, action) in battle_state.pending_player_actions.iter().enumerate() {
-        eprintln!("[DEBUG] submit_move:   Acción {}: user_index={}, move_id={}, target={:?}", 
-            i + 1, action.user_index, action.move_id, action.target_position);
-    }
 
     // Verificar si todas las acciones están listas
     let required_actions = battle_state.player_active_indices.len();
     let pending_count = battle_state.pending_player_actions.len();
     
-    eprintln!("[DEBUG] submit_move: Acciones requeridas: {}, Pendientes: {}", required_actions, pending_count);
     
     // Si no todas las acciones están listas, retornar sin ejecutar el turno
     if pending_count < required_actions {
-        eprintln!("[DEBUG] submit_move: Faltan acciones, esperando más... (faltan: {})", required_actions - pending_count);
         session.battle = Some(battle_state.clone());
         state.sessions.insert(payload.session_id.clone(), session.clone());
         return Ok(Json(SubmitMoveResponse {
@@ -188,7 +151,6 @@ pub async fn submit_move(
     }
 
     // Todas las acciones están listas, ejecutar el turno
-    eprintln!("[DEBUG] submit_move: Todas las acciones están listas, ejecutando turno...");
     let mut rng = StdRng::from_entropy();
 
     // Inicializar PP para todos los Pokémon activos del jugador (antes de ejecutar el turno)
@@ -256,7 +218,6 @@ pub async fn submit_move(
     }
 
     // Ejecutar el turno usando el nuevo pipeline
-    eprintln!("[DEBUG] submit_move: Llamando al nuevo pipeline execute_turn...");
     let turn_result = if battle_state.is_trainer_battle {
         // Extraer opponent_team temporalmente para evitar problemas de borrow
         let mut opponent_team = std::mem::take(&mut battle_state.opponent_team);
@@ -283,15 +244,15 @@ pub async fn submit_move(
         // Sincronizar el oponente de vuelta
         if let Some(opponent) = opponent_vec.first() {
             battle_state.opponent_instance = opponent.clone();
+            // IMPORTANTE: También sincronizar opponent_team[0] para que get_opponent_active() retorne el valor correcto
+            battle_state.opponent_team[0] = opponent.clone();
         }
         result
     };
 
-    eprintln!("[DEBUG] submit_move: Turno ejecutado, resultado: {:?}", turn_result.outcome);
 
     // Limpiar las acciones pendientes después de ejecutar el turno
     battle_state.pending_player_actions.clear();
-    eprintln!("[DEBUG] submit_move: Acciones pendientes limpiadas");
 
     // Añadir logs al estado de batalla
     for log in &turn_result.logs {
@@ -650,9 +611,6 @@ pub async fn switch_pokemon(
     State(state): State<AppState>,
     Json(payload): Json<SwitchPokemonRequest>,
 ) -> Result<Json<SwitchPokemonResponse>, StatusCode> {
-    eprintln!("[DEBUG] switch_pokemon: Recibida solicitud - session_id: {}, switch_to_index: {}", 
-        payload.session_id, payload.switch_to_index);
-    
     // Buscar la sesión
     let mut session = state
         .sessions
@@ -660,7 +618,6 @@ pub async fn switch_pokemon(
         .ok_or(StatusCode::NOT_FOUND)?
         .clone();
     
-    eprintln!("[DEBUG] switch_pokemon: Sesión encontrada, estado: {:?}", session.state);
 
     // Validar que esté en estado de batalla (normal o gimnasio)
     if session.state != GameState::Battle && session.state != GameState::GymBattle {
@@ -684,26 +641,21 @@ pub async fn switch_pokemon(
 
     // Obtener el primer índice activo (compatibilidad con Single)
     let current_player_index = battle_state.player_active_indices.first().copied().ok_or(StatusCode::BAD_REQUEST)?;
-    eprintln!("[DEBUG] switch_pokemon: Índice actual: {}, Índice objetivo: {}", current_player_index, payload.switch_to_index);
     
     // Validar que no sea el mismo Pokémon que ya está activo
     if payload.switch_to_index == current_player_index {
-        eprintln!("[DEBUG] switch_pokemon: ERROR - Intento de cambiar al mismo Pokémon");
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Validar que el Pokémon al que se quiere cambiar no esté debilitado
     let target_pokemon = &session.team.active_members[payload.switch_to_index];
-    eprintln!("[DEBUG] switch_pokemon: Pokémon objetivo: {} (HP: {})", target_pokemon.species.display_name, target_pokemon.current_hp);
     if target_pokemon.current_hp == 0 {
-        eprintln!("[DEBUG] switch_pokemon: ERROR - Pokémon objetivo está debilitado");
         return Err(StatusCode::BAD_REQUEST);
     }
 
     // Obtener el Pokémon actual ANTES del cambio para determinar si es forzado
     let current_active = &session.team.active_members[current_player_index];
     let is_forced_switch = current_active.current_hp == 0;
-    eprintln!("[DEBUG] switch_pokemon: Cambio forzado: {} (HP actual: {})", is_forced_switch, current_active.current_hp);
 
     // Obtener el nombre del Pokémon actual y del nuevo
     let current_pokemon_name = current_active.species.display_name.clone();
