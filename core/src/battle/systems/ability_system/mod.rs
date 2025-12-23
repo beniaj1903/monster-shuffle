@@ -9,6 +9,9 @@ pub mod registry;
 pub mod triggers;
 pub mod processor;
 
+#[cfg(test)]
+mod tests;
+
 // Re-exportar tipos y funciones principales del registry
 pub use registry::{
     AbilityTrigger, AbilityEffect, AbilityHook, StatChangeTarget, HealCondition,

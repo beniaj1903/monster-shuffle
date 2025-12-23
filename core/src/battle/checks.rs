@@ -38,21 +38,16 @@ pub fn initialize_move_pp(pokemon: &mut PokemonInstance, move_template_id: &str,
 /// Decrementa el PP de un movimiento después de usarlo
 /// Retorna true si el movimiento se usó exitosamente (tenía PP > 0)
 pub fn consume_move_pp(pokemon: &mut PokemonInstance, move_template_id: &str) -> bool {
-    eprintln!("[DEBUG] consume_move_pp: Intentando consumir PP de {} para {}", move_template_id, pokemon.species.display_name);
     // Buscar el movimiento aprendido en la lista del Pokémon
     if let Some(learned_move) = pokemon.get_learned_move(move_template_id) {
-        eprintln!("[DEBUG] consume_move_pp: Movimiento encontrado, PP actual: {}/{}", learned_move.current_pp, learned_move.max_pp);
         // Verificar que tenga PP disponible
         if learned_move.current_pp > 0 {
             learned_move.current_pp -= 1;
-            eprintln!("[DEBUG] consume_move_pp: PP consumido, nuevo PP: {}/{}", learned_move.current_pp, learned_move.max_pp);
             return true;
         } else {
-            eprintln!("[DEBUG] consume_move_pp: WARNING - Sin PP disponible (current_pp = 0)");
             return false; // Sin PP disponible
         }
     }
-    eprintln!("[DEBUG] consume_move_pp: ERROR - Movimiento {} no encontrado en los movimientos aprendidos", move_template_id);
     false // Movimiento no encontrado
 }
 
@@ -60,13 +55,7 @@ pub fn consume_move_pp(pokemon: &mut PokemonInstance, move_template_id: &str) ->
 /// Retorna true si tiene al menos un movimiento con PP > 0
 pub fn has_moves_with_pp(pokemon: &PokemonInstance) -> bool {
     let active_moves = pokemon.get_active_learned_moves();
-    let has_pp = active_moves.iter().any(|m| m.current_pp > 0);
-    eprintln!("[DEBUG] has_moves_with_pp: {} tiene {} movimientos activos, tiene PP: {}", 
-        pokemon.species.display_name, active_moves.len(), has_pp);
-    for m in active_moves {
-        eprintln!("[DEBUG] has_moves_with_pp:   - {}: {}/{} PP", m.move_id, m.current_pp, m.max_pp);
-    }
-    has_pp
+    active_moves.iter().any(|m| m.current_pp > 0)
 }
 
 /// Crea un MoveData para Struggle (movimiento de emergencia)
@@ -94,6 +83,7 @@ pub fn create_struggle_move() -> MoveData {
             min_turns: None,
             max_turns: None,
             makes_contact: true, // Struggle hace contacto
+            forces_switch: false,
         },
         stat_changes: Vec::new(),
         target: "selected-pokemon".to_string(),
@@ -179,6 +169,22 @@ pub(crate) fn can_pokemon_move(pokemon: &mut PokemonInstance, rng: &mut StdRng) 
                 return (false, logs);
             } else {
                 logs.push(format!("¡{} superó la confusión este turno!", pokemon.species.display_name));
+            }
+        }
+
+        // Verificar infatuation (Attract)
+        if volatile.infatuated_by.is_some() {
+            logs.push(format!("¡{} está enamorado!", pokemon.species.display_name));
+
+            // 50% de probabilidad de no poder atacar
+            if rng.gen_bool(0.5) {
+                logs.push(format!(
+                    "¡{} está inmobilizado por el amor!",
+                    pokemon.species.display_name
+                ));
+                return (false, logs);
+            } else {
+                logs.push(format!("¡{} superó la infatuación este turno!", pokemon.species.display_name));
             }
         }
     }

@@ -39,9 +39,6 @@ pub mod pipeline;
 pub mod checks;
 pub mod ability_logic;
 
-#[cfg(test)]
-mod tests;
-
 // Re-exportar tipos principales para compatibilidad
 pub use context::BattleContext;
 pub use targeting::resolve_targets;

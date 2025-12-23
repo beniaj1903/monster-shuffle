@@ -196,29 +196,78 @@ function App() {
         user_index: userIndex,
         target_position: targetPosition ?? null,
       });
-      
+
       // Si el turno no se ejecutó (faltan más acciones en dobles), mostrar mensaje
       if (!response.turn_executed && response.pending_actions > 0) {
-        // No refrescar el estado, solo mostrar que se registró la acción
-        // El usuario puede continuar seleccionando movimientos para sus otros Pokémon
         console.log(`Acción registrada. Faltan ${response.pending_actions} acción(es) más.`);
       }
-      
+
       // Si la batalla terminó y tenemos la sesión actualizada, usarla directamente
       if (response.battle_over && response.session) {
         setGameState(response.session);
-        
+
         // Si el jugador perdió, mostrar Game Over
         if (response.player_won === false) {
           setShowGameOver(true);
         }
       } else if (response.turn_executed) {
-        // Si el turno se ejecutó, refrescar el estado del juego después del turno
+        // Actualizar HP inmediatamente para feedback visual instantáneo
+        if (gameState.battle && (response.player_hp !== undefined || response.enemy_hp !== undefined)) {
+          setGameState(prev => {
+            if (!prev || !prev.battle) return prev;
+
+            const updatedState = { ...prev };
+            const battle = updatedState.battle;
+            if (!battle) return prev;
+
+            // Actualizar HP del jugador (primer Pokémon activo)
+            if (response.player_hp !== undefined && updatedState.team.active_members.length > 0) {
+              const playerActiveIndex = battle.player_active_indices?.[0] ?? 0;
+              const updatedMembers = [...updatedState.team.active_members];
+              if (updatedMembers[playerActiveIndex]) {
+                updatedMembers[playerActiveIndex] = {
+                  ...updatedMembers[playerActiveIndex],
+                  current_hp: response.player_hp,
+                };
+                updatedState.team = { ...updatedState.team, active_members: updatedMembers };
+              }
+            }
+
+            // Actualizar HP del enemigo
+            if (response.enemy_hp !== undefined) {
+              if (battle.is_trainer_battle && battle.opponent_team) {
+                const opponentActiveIndex = battle.opponent_active_indices?.[0] ?? 0;
+                const updatedOpponents = [...battle.opponent_team];
+                if (updatedOpponents[opponentActiveIndex]) {
+                  updatedOpponents[opponentActiveIndex] = {
+                    ...updatedOpponents[opponentActiveIndex],
+                    current_hp: response.enemy_hp,
+                  };
+                  updatedState.battle = { ...battle, opponent_team: updatedOpponents };
+                }
+              } else {
+                // Wild battle - actualizar opponent_instance
+                updatedState.battle = {
+                  ...battle,
+                  opponent_instance: {
+                    ...battle.opponent_instance,
+                    current_hp: response.enemy_hp,
+                  },
+                };
+              }
+            }
+
+            return updatedState;
+          });
+        }
+
+        // Refrescar el estado completo de forma asíncrona para mantener consistencia
         await refreshGameState();
       } else {
         // Si el turno no se ejecutó, refrescar para ver las acciones pendientes
         await refreshGameState();
       }
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to submit move');
     } finally {
@@ -235,14 +284,63 @@ function App() {
 
     try {
       const response = await api.switchPokemon(sessionId, index);
-      
-      // Actualizar el estado con la sesión retornada
-      setGameState(response.session);
-      
+
+      // Actualizar HP inmediatamente si están disponibles
+      if (response.player_hp !== undefined || response.enemy_hp !== undefined) {
+        setGameState(prev => {
+          if (!prev || !prev.battle) return response.session;
+
+          const updatedState = { ...response.session };
+          const battle = updatedState.battle;
+          if (!battle) return response.session;
+
+          // Actualizar HP del jugador si está disponible
+          if (response.player_hp !== undefined && updatedState.team.active_members.length > 0) {
+            const playerActiveIndex = battle.player_active_indices?.[0] ?? 0;
+            const updatedMembers = [...updatedState.team.active_members];
+            if (updatedMembers[playerActiveIndex]) {
+              updatedMembers[playerActiveIndex] = {
+                ...updatedMembers[playerActiveIndex],
+                current_hp: response.player_hp,
+              };
+              updatedState.team = { ...updatedState.team, active_members: updatedMembers };
+            }
+          }
+
+          // Actualizar HP del enemigo si está disponible
+          if (response.enemy_hp !== undefined) {
+            if (battle.is_trainer_battle && battle.opponent_team) {
+              const opponentActiveIndex = battle.opponent_active_indices?.[0] ?? 0;
+              const updatedOpponents = [...battle.opponent_team];
+              if (updatedOpponents[opponentActiveIndex]) {
+                updatedOpponents[opponentActiveIndex] = {
+                  ...updatedOpponents[opponentActiveIndex],
+                  current_hp: response.enemy_hp,
+                };
+                updatedState.battle = { ...battle, opponent_team: updatedOpponents };
+              }
+            } else {
+              updatedState.battle = {
+                ...battle,
+                opponent_instance: {
+                  ...battle.opponent_instance,
+                  current_hp: response.enemy_hp,
+                },
+              };
+            }
+          }
+
+          return updatedState;
+        });
+      } else {
+        // Si no hay HP values, usar la sesión directamente
+        setGameState(response.session);
+      }
+
       // Si la batalla terminó, refrescar el estado completo
       if (response.battle_over) {
         await refreshGameState();
-        
+
         // Si el jugador perdió, mostrar Game Over
         if (response.player_won === false) {
           setShowGameOver(true);

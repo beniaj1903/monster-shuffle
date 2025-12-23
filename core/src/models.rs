@@ -289,6 +289,56 @@ pub struct VolatileStatus {
     /// Contador de turnos con BadPoison para daño escalante (Toxic)
     #[serde(default)]
     pub badly_poisoned_turns: u8,
+
+    // --- Fase 1.3: Volatile Status Avanzado ---
+
+    /// ID del Pokémon que causó infatuation (Attract)
+    /// Si está presente, hay 50% chance de no poder atacar
+    #[serde(default)]
+    pub infatuated_by: Option<String>,
+
+    /// Si el Pokémon tiene Leech Seed activo
+    /// Pierde 1/8 HP al final del turno y cura al usuario
+    #[serde(default)]
+    pub leech_seeded: bool,
+
+    /// ID del Pokémon que usó Leech Seed (para curación)
+    #[serde(default)]
+    pub leech_seed_source: Option<String>,
+
+    /// HP del Substitute activo (0 = no hay substitute)
+    /// Absorbe daño hasta que se rompa
+    #[serde(default)]
+    pub substitute_hp: u16,
+
+    /// Contador de Perish Song (None = no activo, Some(n) = turnos restantes)
+    /// Cuando llega a 0, el Pokémon es debilitado
+    #[serde(default)]
+    pub perish_count: Option<u8>,
+
+    // --- Fase 2.1: Protecciones Avanzadas ---
+
+    /// Si Wide Guard está activo este turno (protege del equipo de spread moves)
+    #[serde(default)]
+    pub wide_guard_active: bool,
+
+    /// Si Quick Guard está activo este turno (protege del equipo de priority moves)
+    #[serde(default)]
+    pub quick_guard_active: bool,
+
+    /// Si Mat Block está activo este turno (protege del equipo, solo funciona en turno 1)
+    #[serde(default)]
+    pub mat_block_active: bool,
+
+    /// Si Crafty Shield está activo este turno (protege del equipo de status moves)
+    #[serde(default)]
+    pub crafty_shield_active: bool,
+
+    // --- Fase 2.3: Movimientos de Switch Forzado ---
+
+    /// Si este Pokémon fue marcado para switch forzado este turno (Dragon Tail, Roar, etc.)
+    #[serde(default)]
+    pub forced_switch: bool,
 }
 
 impl VolatileStatus {
@@ -303,6 +353,16 @@ impl VolatileStatus {
             must_recharge: false,
             charging_move: None,
             badly_poisoned_turns: 0,
+            infatuated_by: None,
+            leech_seeded: false,
+            leech_seed_source: None,
+            substitute_hp: 0,
+            perish_count: None,
+            wide_guard_active: false,
+            quick_guard_active: false,
+            mat_block_active: false,
+            crafty_shield_active: false,
+            forced_switch: false,
         }
     }
 
@@ -311,6 +371,16 @@ impl VolatileStatus {
     pub fn reset_turn(&mut self) {
         self.flinched = false;
         self.protected = false;
+
+        // Resetear protecciones avanzadas (Fase 2.1)
+        self.wide_guard_active = false;
+        self.quick_guard_active = false;
+        self.mat_block_active = false;
+        self.crafty_shield_active = false;
+
+        // Resetear switch forzado (Fase 2.3)
+        self.forced_switch = false;
+
         // confused, crit_stage, protect_counter, must_recharge y charging_move persisten entre turnos
     }
 
@@ -427,6 +497,9 @@ pub struct MoveMeta {
     /// Si el movimiento hace contacto físico (afecta habilidades como Rough Skin, Static, Tough Claws)
     #[serde(default)]
     pub makes_contact: bool,
+    /// Si el movimiento fuerza al objetivo a cambiar (Dragon Tail, Roar, etc.)
+    #[serde(default)]
+    pub forces_switch: bool,
 }
 
 impl Default for MoveMeta {
@@ -444,6 +517,7 @@ impl Default for MoveMeta {
             min_turns: None,
             max_turns: None,
             makes_contact: false,
+            forces_switch: false,
         }
     }
 }

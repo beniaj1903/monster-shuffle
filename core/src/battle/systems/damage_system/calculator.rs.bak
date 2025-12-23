@@ -19,8 +19,10 @@ pub fn calculate_damage(
 ) -> (u16, String, bool) {
     // Si el movimiento no tiene poder, retorna 0
     let Some(power) = move_data.power else {
+        eprintln!("[DEBUG] calculate_damage: Movimiento sin poder, retornando 0");
         return (0, String::new(), false);
     };
+    eprintln!("[DEBUG] calculate_damage: Poder base: {}", power);
 
     // Obtener el tipo del movimiento
     let move_type = parse_type(&move_data.r#type);
@@ -727,6 +729,7 @@ fn apply_ability_damage_multiplier(
             AbilityEffect::BoostWeakMoves { power_threshold, multiplier } => {
                 if let Some(power) = move_data.power {
                     if power <= *power_threshold {
+                        eprintln!("[DEBUG] Technician activado para {} (poder: {})", move_data.name, power);
                         return *multiplier;
                     }
                 }
@@ -740,6 +743,7 @@ fn apply_ability_damage_multiplier(
                     || !move_data.stat_changes.is_empty();
 
                 if has_secondary_effects {
+                    eprintln!("[DEBUG] Sheer Force activado para {}", move_data.name);
                     return *damage_multiplier;
                 }
             },
@@ -766,6 +770,8 @@ fn apply_defender_ability_reduction(
             AbilityEffect::ReduceSuperEffectiveDamage { multiplier } => {
                 // Solo se aplica si el ataque es super efectivo (>= 2.0x)
                 if type_effectiveness >= 2.0 {
+                    eprintln!("[DEBUG] {} redujo el daño super efectivo ({} -> {})",
+                        ability_id, type_effectiveness, type_effectiveness * multiplier);
                     return *multiplier;
                 }
             },

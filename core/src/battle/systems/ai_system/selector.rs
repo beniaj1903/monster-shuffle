@@ -48,22 +48,20 @@ pub fn select_ai_move(pokemon: &PokemonInstance, _logs: &mut Vec<String>) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{PokemonSpecies, RandomizedProfile, LearnedMove, ComputedStats};
+    use crate::models::{PokemonSpecies, RandomizedProfile, LearnedMove, Stats, PokemonType, StatModifiers};
 
     #[test]
     fn test_select_ai_move_returns_first_with_pp() {
         let mut pokemon = create_test_pokemon();
 
         // Agregar movimientos con PP
-        pokemon.randomized_profile.moves = vec![
+        pokemon.randomized_profile.learned_moves = vec![
             LearnedMove {
-                template_id: "tackle".to_string(),
                 move_id: "tackle".to_string(),
                 max_pp: 35,
                 current_pp: 35,
             },
             LearnedMove {
-                template_id: "thunderbolt".to_string(),
                 move_id: "thunderbolt".to_string(),
                 max_pp: 15,
                 current_pp: 15,
@@ -81,15 +79,13 @@ mod tests {
         let mut pokemon = create_test_pokemon();
 
         // Primer movimiento sin PP, segundo con PP
-        pokemon.randomized_profile.moves = vec![
+        pokemon.randomized_profile.learned_moves = vec![
             LearnedMove {
-                template_id: "tackle".to_string(),
                 move_id: "tackle".to_string(),
                 max_pp: 35,
                 current_pp: 0, // Sin PP
             },
             LearnedMove {
-                template_id: "thunderbolt".to_string(),
                 move_id: "thunderbolt".to_string(),
                 max_pp: 15,
                 current_pp: 15,
@@ -107,9 +103,8 @@ mod tests {
         let mut pokemon = create_test_pokemon();
 
         // Todos los movimientos sin PP
-        pokemon.randomized_profile.moves = vec![
+        pokemon.randomized_profile.learned_moves = vec![
             LearnedMove {
-                template_id: "tackle".to_string(),
                 move_id: "tackle".to_string(),
                 max_pp: 35,
                 current_pp: 0,
@@ -124,16 +119,25 @@ mod tests {
 
     fn create_test_pokemon() -> PokemonInstance {
         PokemonInstance {
-            id: 0,
+            id: "test-0".to_string(),
             species: PokemonSpecies {
                 species_id: "pikachu".to_string(),
                 display_name: "Pikachu".to_string(),
-                base_hp: 35,
-                base_attack: 55,
-                base_defense: 40,
-                base_special_attack: 50,
-                base_special_defense: 50,
-                base_speed: 90,
+                generation: 1,
+                primary_type: PokemonType::Electric,
+                secondary_type: None,
+                base_stats: Stats {
+                    hp: 35,
+                    attack: 55,
+                    defense: 40,
+                    special_attack: 50,
+                    special_defense: 50,
+                    speed: 90,
+                },
+                move_pool: vec!["tackle".to_string()],
+                possible_abilities: vec!["static".to_string()],
+                is_starter_candidate: false,
+                evolutions: Vec::new(),
             },
             level: 50,
             current_hp: 100,
@@ -142,12 +146,17 @@ mod tests {
             battle_stages: None,
             ability: "static".to_string(),
             held_item: None,
+            individual_values: Stats::default(),
+            effort_values: Stats::default(),
             randomized_profile: RandomizedProfile {
-                rolled_primary_type: crate::models::PokemonType::Electric,
+                rolled_primary_type: PokemonType::Electric,
                 rolled_secondary_type: None,
+                rolled_ability_id: "static".to_string(),
+                stat_modifiers: crate::models::StatModifiers::default(),
+                learned_moves: Vec::new(),
                 moves: Vec::new(),
             },
-            base_computed_stats: ComputedStats {
+            base_computed_stats: Stats {
                 hp: 100,
                 attack: 70,
                 defense: 60,

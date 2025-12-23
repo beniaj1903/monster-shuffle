@@ -7,6 +7,9 @@ pub mod item_effects;
 pub mod item_triggers;
 pub mod item_processor;
 
+#[cfg(test)]
+mod tests;
+
 // Re-exportar tipos principales
 pub use item_effects::{ItemEffect, apply_item_effect};
 pub use item_triggers::{ItemTrigger, check_item_trigger};

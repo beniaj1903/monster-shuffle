@@ -186,6 +186,22 @@ pub enum AbilityEffect {
     /// Ignora habilidades del oponente (Mold Breaker, Teravolt, Turboblaze)
     IgnoreOpponentAbility,
 
+    /// Reduce daño super efectivo (Solid Rock, Filter)
+    ReduceSuperEffectiveDamage {
+        multiplier: f32, // 0.75 = reduce a 75% (25% de reducción)
+    },
+
+    /// Potencia movimientos débiles (Technician)
+    BoostWeakMoves {
+        power_threshold: u16, // 60 para Technician
+        multiplier: f32,      // 1.5 para Technician
+    },
+
+    /// Elimina efectos secundarios y aumenta daño (Sheer Force)
+    RemoveSecondaryEffects {
+        damage_multiplier: f32, // 1.3 para Sheer Force
+    },
+
     /// Lógica única personalizada (para habilidades muy complejas)
     Custom {
         ability_id: String,
@@ -323,12 +339,11 @@ pub fn get_ability_hooks(ability_id: &str) -> Vec<AbilityHook> {
             },
         )],
 
+        // Download necesita lógica custom ya que debe comparar Defense vs Sp. Defense
         "download" => vec![AbilityHook::new(
             AbilityTrigger::OnEntry,
-            AbilityEffect::ModifyStatOnEntry {
-                stat: "attack".to_string(), // Simplificado: siempre ataque
-                stages: 1,
-                target: StatChangeTarget::User,
+            AbilityEffect::Custom {
+                ability_id: "download".to_string(),
             },
         )],
 
@@ -638,6 +653,35 @@ pub fn get_ability_hooks(ability_id: &str) -> Vec<AbilityHook> {
         "mold-breaker" | "teravolt" | "turboblaze" => vec![AbilityHook::new(
             AbilityTrigger::BeforeDamage,
             AbilityEffect::IgnoreOpponentAbility,
+        )],
+
+        // ============================================================
+        // FASE 2.2: ABILITIES CRÍTICAS VGC
+        // ============================================================
+
+        // Solid Rock / Filter: Reduce daño super efectivo en 25%
+        "solid-rock" | "filter" => vec![AbilityHook::new(
+            AbilityTrigger::BeforeDamage,
+            AbilityEffect::ReduceSuperEffectiveDamage {
+                multiplier: 0.75, // 25% de reducción
+            },
+        )],
+
+        // Technician: Potencia movimientos con poder ≤ 60 en 1.5x
+        "technician" => vec![AbilityHook::new(
+            AbilityTrigger::BeforeDamage,
+            AbilityEffect::BoostWeakMoves {
+                power_threshold: 60,
+                multiplier: 1.5,
+            },
+        )],
+
+        // Sheer Force: Elimina efectos secundarios y aumenta daño en 30%
+        "sheer-force" => vec![AbilityHook::new(
+            AbilityTrigger::BeforeDamage,
+            AbilityEffect::RemoveSecondaryEffects {
+                damage_multiplier: 1.3,
+            },
         )],
 
         // ============================================================

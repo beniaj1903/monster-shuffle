@@ -1,6 +1,18 @@
 use serde::{Deserialize, Serialize};
 use crate::models::{PokemonInstance, WeatherState, TerrainState, BattleFormat, FieldPosition};
 
+/// Estado de redirección activo en la batalla
+/// Usado para Follow Me, Rage Powder, Spotlight
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RedirectionState {
+    /// Posición del Pokémon que está redirigiendo
+    pub redirector_position: FieldPosition,
+    /// Tipo de redirección ("follow-me", "rage-powder", "spotlight")
+    pub redirection_type: String,
+    /// Si solo afecta movimientos del oponente (true para Follow Me/Rage Powder)
+    pub opponent_only: bool,
+}
+
 /// Acción pendiente de un Pokémon del jugador
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PendingPlayerAction {
@@ -200,9 +212,21 @@ pub struct BattleState {
     /// Estado del terreno en batalla (None al comenzar)
     #[serde(default)]
     pub terrain: Option<TerrainState>,
+    /// Estado de redirección activo (Follow Me, Rage Powder, Spotlight)
+    #[serde(default)]
+    pub redirection: Option<RedirectionState>,
     /// Acciones pendientes del jugador para este turno (en dobles, se necesitan 2)
     #[serde(default)]
     pub pending_player_actions: Vec<PendingPlayerAction>,
+
+    // --- Fase 1.4: Trick Room ---
+
+    /// Si Trick Room está activo (invierte el orden de velocidad)
+    #[serde(default)]
+    pub trick_room_active: bool,
+    /// Turnos restantes de Trick Room (máximo 5)
+    #[serde(default)]
+    pub trick_room_turns_left: u8,
 }
 
 impl BattleState {
@@ -271,7 +295,10 @@ impl BattleState {
             log: Vec::new(),
             weather: None,
             terrain: None,
+            redirection: None,
             pending_player_actions: Vec::new(),
+            trick_room_active: false,
+            trick_room_turns_left: 0,
         }
     }
 

@@ -11,3 +11,8 @@ pub mod effect_system;
 pub mod ai_system;
 pub mod validation_system;
 pub mod item_system;
+pub mod redirection_system;
+pub mod protection_system;
+
+#[cfg(test)]
+mod integration_tests;

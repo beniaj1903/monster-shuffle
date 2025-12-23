@@ -49,40 +49,53 @@ pub fn reset_turn_flags(
 mod tests {
     use super::*;
     use crate::models::{
-        PokemonSpecies, RandomizedProfile, ComputedStats, PokemonType, VolatileStatus,
+        PokemonSpecies, RandomizedProfile, Stats, PokemonType, VolatileStatus, StatModifiers,
     };
 
     fn create_test_pokemon_with_protect() -> PokemonInstance {
+        let mut volatile = VolatileStatus::new();
+        volatile.protected = true;
+        volatile.protect_counter = 1;
+
         PokemonInstance {
-            id: 0,
+            id: "test-0".to_string(),
             species: PokemonSpecies {
                 species_id: "pikachu".to_string(),
                 display_name: "Pikachu".to_string(),
-                base_hp: 35,
-                base_attack: 55,
-                base_defense: 40,
-                base_special_attack: 50,
-                base_special_defense: 50,
-                base_speed: 90,
+                generation: 1,
+                primary_type: PokemonType::Electric,
+                secondary_type: None,
+                base_stats: Stats {
+                    hp: 35,
+                    attack: 55,
+                    defense: 40,
+                    special_attack: 50,
+                    special_defense: 50,
+                    speed: 90,
+                },
+                move_pool: vec!["tackle".to_string()],
+                possible_abilities: vec!["static".to_string()],
+                is_starter_candidate: false,
+                evolutions: Vec::new(),
             },
             level: 50,
             current_hp: 100,
             status_condition: None,
-            volatile_status: Some(VolatileStatus {
-                protected: true,
-                protect_counter: 1,
-                flinched: false,
-                charging_move: None,
-            }),
+            volatile_status: Some(volatile),
             battle_stages: None,
             ability: "static".to_string(),
             held_item: None,
+            individual_values: Stats::default(),
+            effort_values: Stats::default(),
             randomized_profile: RandomizedProfile {
                 rolled_primary_type: PokemonType::Electric,
                 rolled_secondary_type: None,
+                rolled_ability_id: "static".to_string(),
+                stat_modifiers: StatModifiers::default(),
+                learned_moves: Vec::new(),
                 moves: Vec::new(),
             },
-            base_computed_stats: ComputedStats {
+            base_computed_stats: Stats {
                 hp: 100,
                 attack: 70,
                 defense: 60,
